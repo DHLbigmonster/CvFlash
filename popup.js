@@ -1,5 +1,5 @@
 /**
- * CVmax Popup Script
+ * CVflash Popup Script
  */
 
 // DOM refs
@@ -75,15 +75,15 @@ function renderCategoryTabs(resumes, activeId) {
 async function init() {
   // 从 storage 加载数据
   const data = await chrome.storage.local.get([
-    'cvmax_resumes', 'cvmax_active_resume', 'cvmax_api_key', 'cvmax_settings'
+    'cvflash_resumes', 'cvflash_active_resume', 'cvflash_api_key', 'cvflash_settings'
   ]);
 
-  apiKey = data.cvmax_api_key || '';
-  settings = data.cvmax_settings || { textModel: 'glm-4.7-flash', visionModel: 'glm-4.6v-flash' };
+  apiKey = data.cvflash_api_key || '';
+  settings = data.cvflash_settings || { textModel: 'glm-4.7-flash', visionModel: 'glm-4.6v-flash' };
 
   // 填充简历下拉列表（含分类 tab）
-  const resumes = data.cvmax_resumes || [];
-  renderCategoryTabs(resumes, data.cvmax_active_resume);
+  const resumes = data.cvflash_resumes || [];
+  renderCategoryTabs(resumes, data.cvflash_active_resume);
 
   // API Key 检查
   if (!apiKey) {
@@ -139,11 +139,11 @@ btnEditResume.addEventListener('click', () => {
 });
 
 resumeSelect.addEventListener('change', async () => {
-  const data = await chrome.storage.local.get('cvmax_resumes');
-  const resumes = data.cvmax_resumes || [];
+  const data = await chrome.storage.local.get('cvflash_resumes');
+  const resumes = data.cvflash_resumes || [];
   activeResume = resumes.find(r => r.id === resumeSelect.value);
   if (activeResume) {
-    await chrome.storage.local.set({ cvmax_active_resume: activeResume.id });
+    await chrome.storage.local.set({ cvflash_active_resume: activeResume.id });
   }
 });
 
@@ -200,7 +200,7 @@ async function handleFill() {
       tabId: tab.id,
       resume: activeResume,
       apiKey,
-      apiBase: (await chrome.storage.local.get('cvmax_api_base')).cvmax_api_base,
+      apiBase: (await chrome.storage.local.get('cvflash_api_base')).cvflash_api_base,
       model: settings.textModel
     }).then(resp => {
       if (resp?.error) {
@@ -250,11 +250,11 @@ chrome.runtime.onMessage.addListener((msg) => {
 
 function showMissingHint(hints) {
   // 如果已有提示框就先移除
-  const existing = document.getElementById('cvmax-missing-hint');
+  const existing = document.getElementById('cvflash-missing-hint');
   if (existing) existing.remove();
 
   const div = document.createElement('div');
-  div.id = 'cvmax-missing-hint';
+  div.id = 'cvflash-missing-hint';
   div.style.cssText = `
     background: #fff3cd; border: 1px solid #ffc107; border-radius: 6px;
     padding: 8px 10px; margin: 8px 0; font-size: 12px; color: #856404;
@@ -350,12 +350,12 @@ function sendToContent(tabId, message) {
 }
 
 async function saveHistory(entry) {
-  const data = await chrome.storage.local.get('cvmax_history');
-  const history = data.cvmax_history || [];
+  const data = await chrome.storage.local.get('cvflash_history');
+  const history = data.cvflash_history || [];
   history.unshift(entry);
   // 最多保留 50 条
   if (history.length > 50) history.length = 50;
-  await chrome.storage.local.set({ cvmax_history: history });
+  await chrome.storage.local.set({ cvflash_history: history });
 }
 
 function escapeHtml(str) {

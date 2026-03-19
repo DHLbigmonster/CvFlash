@@ -1,5 +1,5 @@
 /**
- * CVmax Options Page Script
+ * CVflash Options Page Script
  * 管理简历、API 设置、填充历史
  */
 
@@ -31,17 +31,17 @@ async function init() {
 
 async function loadAll() {
   const data = await chrome.storage.local.get([
-    'cvmax_resumes', 'cvmax_active_resume',
-    'cvmax_api_key', 'cvmax_api_base', 'cvmax_settings', 'cvmax_history'
+    'cvflash_resumes', 'cvflash_active_resume',
+    'cvflash_api_key', 'cvflash_api_base', 'cvflash_settings', 'cvflash_history'
   ]);
 
-  allResumes = data.cvmax_resumes || [];
-  activeResumeId = data.cvmax_active_resume || (allResumes[0]?.id ?? null);
+  allResumes = data.cvflash_resumes || [];
+  activeResumeId = data.cvflash_active_resume || (allResumes[0]?.id ?? null);
 
   renderCategoryFilter();
   renderResumeList();
   loadAPISettings(data);
-  renderHistory(data.cvmax_history || []);
+  renderHistory(data.cvflash_history || []);
 }
 
 // ─── Tab 导航 ─────────────────────────────────────────────────────────────────
@@ -124,15 +124,15 @@ function bindResumeActions() {
       if (resume) openEditor(resume);
     } else if (action === 'activate') {
       activeResumeId = id;
-      await chrome.storage.local.set({ cvmax_active_resume: id });
+      await chrome.storage.local.set({ cvflash_active_resume: id });
       renderResumeList();
     } else if (action === 'delete') {
       if (!confirm('确定要删除这份简历吗？')) return;
       allResumes = allResumes.filter(r => r.id !== id);
-      await chrome.storage.local.set({ cvmax_resumes: allResumes });
+      await chrome.storage.local.set({ cvflash_resumes: allResumes });
       if (activeResumeId === id) {
         activeResumeId = allResumes[0]?.id ?? null;
-        await chrome.storage.local.set({ cvmax_active_resume: activeResumeId });
+        await chrome.storage.local.set({ cvflash_active_resume: activeResumeId });
       }
       renderResumeList();
     }
@@ -155,7 +155,7 @@ function bindResumeActions() {
       data.id = generateId();
       data.updatedAt = new Date().toISOString();
       allResumes.push(data);
-      await chrome.storage.local.set({ cvmax_resumes: allResumes });
+      await chrome.storage.local.set({ cvflash_resumes: allResumes });
       renderCategoryFilter();
       renderResumeList();
       showNotify('简历导入成功！');
@@ -267,7 +267,7 @@ async function saveCurrentResume() {
   if (idx >= 0) allResumes[idx] = currentResume;
   else allResumes.push(currentResume);
 
-  await chrome.storage.local.set({ cvmax_resumes: allResumes });
+  await chrome.storage.local.set({ cvflash_resumes: allResumes });
   showNotify('简历已保存！');
   closeEditor();
   renderCategoryFilter();
@@ -476,11 +476,11 @@ function collectEntries(type) {
 // ─── API 设置 ─────────────────────────────────────────────────────────────────
 
 function loadAPISettings(data) {
-  document.getElementById('api-key-input').value = data.cvmax_api_key || '';
-  const apiBase = data.cvmax_api_base || 'https://api.deepseek.com/v1';
+  document.getElementById('api-key-input').value = data.cvflash_api_key || '';
+  const apiBase = data.cvflash_api_base || 'https://api.deepseek.com/v1';
   document.getElementById('api-base-select').value = apiBase;
 
-  const settings = data.cvmax_settings || {};
+  const settings = data.cvflash_settings || {};
   const textModel = document.getElementById('text-model-select');
   const visionModel = document.getElementById('vision-model-select');
   if (settings.textModel) textModel.value = settings.textModel;
@@ -515,9 +515,9 @@ function bindAPIActions() {
       showNotification: document.getElementById('setting-show-notification').checked
     };
     await chrome.storage.local.set({
-      cvmax_api_key: apiKey,
-      cvmax_api_base: apiBase,
-      cvmax_settings: settings
+      cvflash_api_key: apiKey,
+      cvflash_api_base: apiBase,
+      cvflash_settings: settings
     });
     showNotify('设置已保存！');
   });
@@ -576,7 +576,7 @@ function renderHistory(history) {
 function bindHistoryActions() {
   document.getElementById('btn-clear-history').addEventListener('click', async () => {
     if (!confirm('确定要清空所有填充历史吗？')) return;
-    await chrome.storage.local.remove('cvmax_history');
+    await chrome.storage.local.remove('cvflash_history');
     renderHistory([]);
   });
 }
@@ -626,8 +626,8 @@ async function handlePDFUpload(file) {
       }
     }
 
-    const storageData = await chrome.storage.local.get(['cvmax_api_key', 'cvmax_api_base', 'cvmax_settings']);
-    const apiKey = storageData.cvmax_api_key || '';
+    const storageData = await chrome.storage.local.get(['cvflash_api_key', 'cvflash_api_base', 'cvflash_settings']);
+    const apiKey = storageData.cvflash_api_key || '';
 
     if (!apiKey) {
       progressEl.classList.add('hidden');
@@ -635,7 +635,7 @@ async function handlePDFUpload(file) {
       return;
     }
 
-    const settings = storageData.cvmax_settings || {};
+    const settings = storageData.cvflash_settings || {};
 
     if (isScanPDF) {
       setProgress(40, '未找到文字内容，此 PDF 可能为扫描版...');
@@ -663,7 +663,7 @@ async function handlePDFUpload(file) {
         extractedText,
         imageDataUrl: null,
         apiKey,
-        apiBase: storageData.cvmax_api_base,
+        apiBase: storageData.cvflash_api_base,
         textModel: settings.textModel,
         visionModel: settings.visionModel
       });
@@ -692,7 +692,7 @@ async function handlePDFUpload(file) {
     };
 
     allResumes.push(newResume);
-    await chrome.storage.local.set({ cvmax_resumes: allResumes });
+    await chrome.storage.local.set({ cvflash_resumes: allResumes });
 
     setProgress(100, 'PDF 解析完成！');
 
@@ -753,7 +753,7 @@ function exportResume(resume) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `cvmax_${resume.name || 'resume'}.json`;
+  a.download = `cvflash_${resume.name || 'resume'}.json`;
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -771,10 +771,10 @@ function formatDate(iso) {
 
 let notifyTimer = null;
 function showNotify(msg) {
-  let el = document.getElementById('cvmax-notify');
+  let el = document.getElementById('cvflash-notify');
   if (!el) {
     el = document.createElement('div');
-    el.id = 'cvmax-notify';
+    el.id = 'cvflash-notify';
     el.style.cssText = 'position:fixed;bottom:24px;right:24px;background:#1e2e1e;border:1px solid rgba(166,227,161,.3);color:#a6e3a1;padding:10px 18px;border-radius:8px;font-size:13px;z-index:9999;transition:opacity .2s';
     document.body.appendChild(el);
   }

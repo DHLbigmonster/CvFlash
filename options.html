@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CVmax 设置</title>
+  <title>CVflash 设置</title>
   <link rel="stylesheet" href="options.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
     <nav class="sidebar">
       <div class="sidebar__logo">
         <span>📄</span>
-        <span class="sidebar__title">CVmax</span>
+        <span class="sidebar__title">CVflash</span>
       </div>
       <ul class="nav">
         <li class="nav__item active" data-tab="resumes">📋 我的简历</li>
@@ -199,24 +199,24 @@
         </div>
 
         <div class="card">
-          <div class="card__title">🔑 智谱AI (ZhipuAI) 配置</div>
+          <div class="card__title">🔑 AI 配置</div>
           <div class="form-group">
             <label class="label">API Key</label>
             <div class="input-with-btn">
-              <input type="password" id="api-key-input" class="input" placeholder="在 open.bigmodel.cn 申请的 API Key">
+              <input type="password" id="api-key-input" class="input" placeholder="填入你的 API Key">
               <button class="btn btn--ghost btn--sm" id="btn-toggle-key">👁</button>
             </div>
             <div class="form-hint">
-              智谱：<a href="https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys" target="_blank">open.bigmodel.cn</a>
-              | DeepSeek：<a href="https://platform.deepseek.com/api_keys" target="_blank">platform.deepseek.com</a>
+              支持：<a href="https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys" target="_blank">智谱 GLM</a>
+              / <a href="https://platform.deepseek.com/api_keys" target="_blank">DeepSeek</a>
             </div>
           </div>
 
           <div class="form-group">
             <label class="label">API 地址</label>
             <select id="api-base-select" class="input select">
-              <option value="https://open.bigmodel.cn/api/paas/v4">智谱 国内版 (open.bigmodel.cn)</option>
-              <option value="https://api.z.ai/api/paas/v4">智谱 国际版 (api.z.ai)</option>
+              <option value="https://open.bigmodel.cn/api/paas/v4">GLM 国内版 (open.bigmodel.cn)</option>
+              <option value="https://api.z.ai/api/paas/v4">GLM 国际版 (api.z.ai)</option>
               <option value="https://api.deepseek.com/v1">DeepSeek (api.deepseek.com)</option>
             </select>
           </div>
@@ -301,12 +301,12 @@
       <!-- ── 关于 Tab ─────────────────────────────────────────── -->
       <section id="tab-about" class="tab-content">
         <div class="tab-header">
-          <h2 class="tab-title">关于 CVmax</h2>
+          <h2 class="tab-title">关于 CVflash</h2>
         </div>
         <div class="card about-card">
-          <div class="about-logo">📄</div>
-          <h3>CVmax v1.0</h3>
-          <p>智能简历自动填充助手，基于智谱AI GLM 大模型驱动。</p>
+          <div class="about-logo">⚡</div>
+          <h3>CVflash 雷电霸王简历 v1.0</h3>
+          <p>AI 驱动的校招表单自动填充插件，让投简历快如闪电。</p>
           <div class="about-features">
             <div class="feature">🔍 自动识别招聘网站表单结构</div>
             <div class="feature">🤖 AI 语义匹配，精准填充</div>

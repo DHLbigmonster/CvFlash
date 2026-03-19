@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "CVmax - 智能简历自动填充",
+  "name": "CVflash - 雷电霸王简历",
   "version": "1.0.0",
-  "description": "基于智谱GLM AI，自动识别招聘网站表单结构并填写简历信息",
+  "description": "AI驱动的校招表单自动填充插件，自动识别招聘网站表单结构并填写简历信息",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
@@ -33,7 +33,7 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "CVmax 简历自动填充",
+    "default_title": "CVflash 雷电霸王简历",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png"

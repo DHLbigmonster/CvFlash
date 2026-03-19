@@ -1,5 +1,5 @@
 /**
- * CVmax Content Script - Universal Form Detector
+ * CVflash Content Script - Universal Form Detector
  *
  * 通用性设计：支持
  * - 标准 HTML 表单 (input/textarea/select)
@@ -58,7 +58,7 @@ async function handleAutofill(fieldMap) {
     // 问题2修复：跳过已有内容的字段，避免重复填充
     const currentVal = getCurrentValue(field.element);
     if (currentVal && String(currentVal).trim() !== '') {
-      console.log(`[CVmax] 跳过已填写字段: "${field.label}" 当前值="${currentVal}"`);
+      console.log(`[CVflash] 跳过已填写字段: "${field.label}" 当前值="${currentVal}"`);
       alreadyFilledCount++;
       continue;
     }
@@ -68,7 +68,7 @@ async function handleAutofill(fieldMap) {
       highlightElement(field.element, 'success');
       filledCount++;
     } catch (e) {
-      console.warn('[CVmax] 填充失败:', field.label || field.name, e);
+      console.warn('[CVflash] 填充失败:', field.label || field.name, e);
       skippedCount++;
     }
   }
@@ -97,8 +97,8 @@ function collectAllFields(root) {
     node.querySelectorAll('input, textarea, select').forEach(el => {
       if (el.tagName === 'INPUT' && IGNORED_INPUT_TYPES.has(el.type)) return;
       if (!isInteractable(el)) return;
-      if (el.dataset.cvmaxScanned) return;
-      el.dataset.cvmaxScanned = '1';
+      if (el.dataset.cvflashScanned) return;
+      el.dataset.cvflashScanned = '1';
 
       const field = buildFieldDescriptor(el, domIndex++);
       if (field) fields.push(field);
@@ -107,9 +107,9 @@ function collectAllFields(root) {
     // 2. contenteditable 元素（富文本、自定义输入框）
     node.querySelectorAll('[contenteditable="true"], [contenteditable=""]').forEach(el => {
       if (!isInteractable(el)) return;
-      if (el.dataset.cvmaxScanned) return;
-      if (el.tagName === 'BODY' || el.closest('[data-cvmax-scanned]')) return;
-      el.dataset.cvmaxScanned = '1';
+      if (el.dataset.cvflashScanned) return;
+      if (el.tagName === 'BODY' || el.closest('[data-cvflash-scanned]')) return;
+      el.dataset.cvflashScanned = '1';
 
       const field = buildFieldDescriptor(el, domIndex++, 'contenteditable');
       if (field) fields.push(field);
@@ -118,9 +118,9 @@ function collectAllFields(root) {
     // 3. ARIA role 自定义输入组件（企业级 UI）
     node.querySelectorAll('[role="textbox"], [role="combobox"], [role="spinbutton"], [role="searchbox"]').forEach(el => {
       if (!isInteractable(el)) return;
-      if (el.dataset.cvmaxScanned) return;
+      if (el.dataset.cvflashScanned) return;
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)) return; // 已处理
-      el.dataset.cvmaxScanned = '1';
+      el.dataset.cvflashScanned = '1';
 
       const field = buildFieldDescriptor(el, domIndex++, 'aria-' + (el.getAttribute('role') || 'textbox'));
       if (field) fields.push(field);
@@ -150,8 +150,8 @@ function collectAllFields(root) {
   walk(root);
 
   // 清除扫描标记以允许下次重扫
-  document.querySelectorAll('[data-cvmax-scanned]').forEach(el => {
-    delete el.dataset.cvmaxScanned;
+  document.querySelectorAll('[data-cvflash-scanned]').forEach(el => {
+    delete el.dataset.cvflashScanned;
   });
 
   return fields;
@@ -609,15 +609,15 @@ function clearAllHighlights() {
 }
 
 function showToast(message, type = 'info') {
-  const existing = document.getElementById('cvmax-toast');
+  const existing = document.getElementById('cvflash-toast');
   if (existing) existing.remove();
 
   const toast = document.createElement('div');
-  toast.id = 'cvmax-toast';
-  toast.className = `cvmax-toast cvmax-toast--${type}`;
+  toast.id = 'cvflash-toast';
+  toast.className = `cvflash-toast cvflash-toast--${type}`;
   toast.innerHTML = `
-    <span class="cvmax-toast__icon">${type === 'success' ? '✓' : type === 'error' ? '✗' : 'ℹ'}</span>
-    <span class="cvmax-toast__text">${message}</span>
+    <span class="cvflash-toast__icon">${type === 'success' ? '✓' : type === 'error' ? '✗' : 'ℹ'}</span>
+    <span class="cvflash-toast__text">${message}</span>
   `;
   document.body.appendChild(toast);
 

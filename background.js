@@ -1,5 +1,5 @@
 /**
- * CVmax Background Service Worker
+ * CVflash Background Service Worker
  * 负责 AI API 调用（避免 CSP 限制）、消息路由、截图捕获
  */
 
@@ -178,8 +178,8 @@ async function handleFullFill({ tabId, resume, apiKey, apiBase, model }) {
 
     // 5. 记录历史
     const tab = await chrome.tabs.get(tabId);
-    const histData = await chrome.storage.local.get('cvmax_history');
-    const history = histData.cvmax_history || [];
+    const histData = await chrome.storage.local.get('cvflash_history');
+    const history = histData.cvflash_history || [];
     history.unshift({
       url: tab.url,
       title: tab.title,
@@ -188,7 +188,7 @@ async function handleFullFill({ tabId, resume, apiKey, apiBase, model }) {
       timestamp: new Date().toISOString()
     });
     if (history.length > 50) history.length = 50;
-    await chrome.storage.local.set({ cvmax_history: history });
+    await chrome.storage.local.set({ cvflash_history: history });
 
     updateFillStatus('done', `已填充 ${fillResp.filledCount} 个字段（AI ${totalAiMatched}${totalFallbackUsed > 0 ? ` + 规则兜底 ${totalFallbackUsed}` : ''}）`, 100);
     console.log(`=== 填充完成 ===`);
@@ -732,7 +732,7 @@ ${buildFieldHintsPrompt(fields, fieldHints)}
 - 工作/实习经历 → 使用简历中 experience 数据（公司、职位、时间、描述）
 - 项目经历 → 使用简历中 projects 数据（项目名、角色、描述、链接）
   ⚠️ 项目名称字段必须填写实际项目名称，绝对不能返回 null！
-  ⚠️ 项目名称示例：MoodPulse、CVmax简历投递插件、高频交易预测模型
+  ⚠️ 项目名称示例：MoodPulse、CVflash简历投递插件、高频交易预测模型
 - 科研经历 → 使用简历中 research 数据（机构、课题、时间、描述）
 - 校园/社团经历 → 使用简历中 activities 数据（组织、职务、时间、描述）
 - 创业类经历 → 使用简历中 experience（isInternship=false的创业/自营经历）或 activities 数据
