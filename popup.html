@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CVmax</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="header__logo">
+        <span class="header__icon">📄</span>
+        <span class="header__title">CVmax</span>
+      </div>
+      <button class="icon-btn" id="btn-settings" title="设置">⚙️</button>
+    </header>
+
+    <!-- Resume Section -->
+    <div class="resume-section">
+      <div class="section__label">当前简历</div>
+      <div id="popup-cat-tabs" class="popup-cat-tabs"></div>
+      <div class="resume-selector">
+        <select id="resume-select" class="select">
+          <option value="">— 请先添加简历 —</option>
+        </select>
+        <button class="icon-btn" id="btn-edit-resume" title="编辑简历">✏️</button>
+      </div>
+    </div>
+
+    <!-- Page Status -->
+    <div class="page-status">
+      <div class="page-status__main">
+        <span id="page-title" class="page-title">—</span>
+        <span id="field-badge" class="field-badge field-badge--gray">未检测</span>
+      </div>
+    </div>
+
+    <!-- Main Actions -->
+    <div class="main-actions">
+      <button class="action-btn action-btn--secondary" id="btn-detect">
+        <span class="action-btn__icon">🔍</span>
+        <span>检测表单</span>
+      </button>
+      <button class="action-btn action-btn--primary" id="btn-fill" disabled>
+        <span class="action-btn__icon">⚡</span>
+        <span>AI 自动填充</span>
+      </button>
+    </div>
+
+    <!-- Vision Mode -->
+    <button class="vision-btn" id="btn-vision">
+      <span class="vision-btn__icon">📸</span>
+      <span>截图识别填充（视觉模式）</span>
+    </button>
+
+    <!-- Status/Error Display -->
+    <div id="status-message" class="status-message hidden">
+      <div class="status-message__content">
+        <span id="status-text">处理中...</span>
+        <div class="spinner" id="status-spinner"></div>
+      </div>
+    </div>
+
+    <!-- Error Display -->
+    <div id="error-message" class="error-message hidden">
+      <span id="error-text">填充失败: AI 返回格式异常: 未找到 JSON 结束标记</span>
+    </div>
+
+    <!-- API Warning -->
+    <div id="no-api-warning" class="api-warning hidden">
+      ⚠️ 请先<a href="#" id="warn-goto-settings">设置 API Key</a>才能使用 AI 功能
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <span>智谱GLM 驱动</span>
+      <a href="#" id="btn-history">填充历史</a>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

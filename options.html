@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CVmax 设置</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="layout">
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      <div class="sidebar__logo">
+        <span>📄</span>
+        <span class="sidebar__title">CVmax</span>
+      </div>
+      <ul class="nav">
+        <li class="nav__item active" data-tab="resumes">📋 我的简历</li>
+        <li class="nav__item" data-tab="api">🔑 API 设置</li>
+        <li class="nav__item" data-tab="history">📜 填充历史</li>
+        <li class="nav__item" data-tab="about">ℹ️ 关于</li>
+      </ul>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main">
+
+      <!-- ── 简历管理 Tab ─────────────────────────────────────────── -->
+      <section id="tab-resumes" class="tab-content active">
+        <div class="tab-header">
+          <h2 class="tab-title">我的简历</h2>
+          <div class="tab-header__actions">
+            <button class="btn btn--ghost" id="btn-upload-pdf">📄 上传 PDF</button>
+            <button class="btn btn--ghost" id="btn-import">📂 导入 JSON</button>
+            <button class="btn btn--primary" id="btn-new-resume">+ 新建简历</button>
+          </div>
+        </div>
+
+        <!-- Category Filter -->
+        <div id="category-filter" class="category-filter">
+          <button class="cat-btn active" data-cat="">全部</button>
+        </div>
+
+        <!-- Resume List -->
+        <div id="resume-list" class="resume-list"></div>
+
+        <!-- PDF Upload Progress -->
+        <div id="pdf-progress" class="pdf-progress hidden">
+          <div class="pdf-progress__bar"><div id="pdf-progress-fill" class="pdf-progress__fill"></div></div>
+          <div id="pdf-progress-text" class="pdf-progress__text">正在解析 PDF...</div>
+        </div>
+
+        <!-- Resume Editor -->
+        <div id="resume-editor" class="resume-editor hidden">
+          <div class="editor-header">
+            <div class="editor-header__fields">
+              <input type="text" id="resume-name" class="input editor-name" placeholder="简历名称（如：前端工程师-2025）">
+              <input type="text" id="resume-category" class="input editor-category" placeholder="分类标签（如：前端、产品、校招）">
+            </div>
+            <div class="editor-header__actions">
+              <button class="btn btn--ghost" id="btn-export-resume">📤 导出</button>
+              <button class="btn btn--secondary" id="btn-cancel-edit">取消</button>
+              <button class="btn btn--primary" id="btn-save-resume">保存</button>
+            </div>
+          </div>
+
+          <!-- Personal Info -->
+          <div class="card">
+            <div class="card__title">👤 基本信息</div>
+            <div class="form-grid">
+              <div class="form-group">
+                <label class="label">姓名 *</label>
+                <input type="text" id="f-name" class="input" placeholder="张三">
+              </div>
+              <div class="form-group">
+                <label class="label">邮箱 *</label>
+                <input type="email" id="f-email" class="input" placeholder="zhangsan@example.com">
+              </div>
+              <div class="form-group">
+                <label class="label">手机号 *</label>
+                <input type="tel" id="f-phone" class="input" placeholder="13800000000">
+              </div>
+              <div class="form-group">
+                <label class="label">所在城市</label>
+                <input type="text" id="f-location" class="input" placeholder="北京市">
+              </div>
+              <div class="form-group">
+                <label class="label">LinkedIn</label>
+                <input type="url" id="f-linkedin" class="input" placeholder="linkedin.com/in/zhangsan">
+              </div>
+              <div class="form-group">
+                <label class="label">GitHub</label>
+                <input type="text" id="f-github" class="input" placeholder="github.com/zhangsan">
+              </div>
+              <div class="form-group form-group--full">
+                <label class="label">个人网站</label>
+                <input type="url" id="f-website" class="input" placeholder="https://zhangsan.dev">
+              </div>
+            </div>
+          </div>
+
+          <!-- Summary -->
+          <div class="card">
+            <div class="card__title">📝 个人陈述 / 自我评价</div>
+            <textarea id="f-summary" class="input textarea" rows="4" placeholder="简要介绍你的职业背景、核心优势和求职意向..."></textarea>
+          </div>
+
+          <!-- Education -->
+          <div class="card">
+            <div class="card__title">
+              🎓 教育背景
+              <button class="btn btn--ghost btn--sm" id="btn-add-edu">+ 添加</button>
+            </div>
+            <div id="education-list" class="entries-list"></div>
+          </div>
+
+          <!-- Experience -->
+          <div class="card">
+            <div class="card__title">
+              💼 工作 / 实习经历
+              <button class="btn btn--ghost btn--sm" id="btn-add-exp">+ 添加</button>
+            </div>
+            <div id="experience-list" class="entries-list"></div>
+          </div>
+
+          <!-- Projects -->
+          <div class="card">
+            <div class="card__title">
+              🚀 项目经历
+              <button class="btn btn--ghost btn--sm" id="btn-add-proj">+ 添加</button>
+            </div>
+            <div id="project-list" class="entries-list"></div>
+          </div>
+
+          <!-- Research -->
+          <div class="card">
+            <div class="card__title">
+              🔬 科研经历
+              <button class="btn btn--ghost btn--sm" id="btn-add-research">+ 添加</button>
+            </div>
+            <div id="research-list" class="entries-list"></div>
+          </div>
+
+          <!-- Activities -->
+          <div class="card">
+            <div class="card__title">
+              🏫 校园 / 社团经历
+              <button class="btn btn--ghost btn--sm" id="btn-add-activity">+ 添加</button>
+            </div>
+            <div id="activity-list" class="entries-list"></div>
+          </div>
+
+          <!-- Skills -->
+          <div class="card">
+            <div class="card__title">⚡ 技能</div>
+            <div class="form-group">
+              <input type="text" id="f-skills" class="input" placeholder="Python, SQL, Excel, Prompt Engineering（逗号分隔）">
+            </div>
+          </div>
+
+          <!-- Languages -->
+          <div class="card">
+            <div class="card__title">🌍 语言能力</div>
+            <div class="form-group">
+              <input type="text" id="f-languages" class="input" placeholder="中文(母语), 英语(流利)（逗号分隔）">
+            </div>
+          </div>
+
+          <!-- Certifications -->
+          <div class="card">
+            <div class="card__title">📜 证书</div>
+            <div class="form-group">
+              <input type="text" id="f-certifications" class="input" placeholder="CET-6, PMP, AWS Certified（逗号分隔）">
+            </div>
+          </div>
+
+          <!-- Awards -->
+          <div class="card">
+            <div class="card__title">🏆 荣誉奖项</div>
+            <div class="form-group">
+              <input type="text" id="f-awards" class="input" placeholder="国家奖学金, 优秀毕业生（逗号分隔）">
+            </div>
+          </div>
+
+          <!-- Hobbies -->
+          <div class="card">
+            <div class="card__title">🎯 兴趣爱好</div>
+            <div class="form-group">
+              <input type="text" id="f-hobbies" class="input" placeholder="阅读, 马拉松, 开源贡献（逗号分隔）">
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── API 设置 Tab ─────────────────────────────────────────── -->
+      <section id="tab-api" class="tab-content">
+        <div class="tab-header">
+          <h2 class="tab-title">API 设置</h2>
+        </div>
+
+        <div class="card">
+          <div class="card__title">🔑 智谱AI (ZhipuAI) 配置</div>
+          <div class="form-group">
+            <label class="label">API Key</label>
+            <div class="input-with-btn">
+              <input type="password" id="api-key-input" class="input" placeholder="在 open.bigmodel.cn 申请的 API Key">
+              <button class="btn btn--ghost btn--sm" id="btn-toggle-key">👁</button>
+            </div>
+            <div class="form-hint">
+              智谱：<a href="https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys" target="_blank">open.bigmodel.cn</a>
+              | DeepSeek：<a href="https://platform.deepseek.com/api_keys" target="_blank">platform.deepseek.com</a>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="label">API 地址</label>
+            <select id="api-base-select" class="input select">
+              <option value="https://open.bigmodel.cn/api/paas/v4">智谱 国内版 (open.bigmodel.cn)</option>
+              <option value="https://api.z.ai/api/paas/v4">智谱 国际版 (api.z.ai)</option>
+              <option value="https://api.deepseek.com/v1">DeepSeek (api.deepseek.com)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="label">文本模型</label>
+            <select id="text-model-select" class="input select">
+              <optgroup label="免费模型">
+                <option value="glm-4.7-flash">glm-4.7-flash（免费，推荐）</option>
+                <option value="glm-4-flash-250414">glm-4-flash-250414（免费）</option>
+              </optgroup>
+              <optgroup label="高性能模型">
+                <option value="glm-4.7-flashx">glm-4.7-FlashX（高速轻量）</option>
+                <option value="glm-4.5-air">glm-4.5-Air（均衡）</option>
+                <option value="glm-4.5-airx">glm-4.5-AirX（高速均衡）</option>
+                <option value="glm-4.6">glm-4.6（超高性能）</option>
+                <option value="glm-4.7">glm-4.7（高智能）</option>
+              </optgroup>
+              <optgroup label="旗舰模型">
+                <option value="glm-5-turbo">glm-5-Turbo</option>
+                <option value="glm-5">glm-5（最强旗舰）</option>
+              </optgroup>
+              <optgroup label="长文本">
+                <option value="glm-4-long">glm-4-Long（100万 context）</option>
+              </optgroup>
+              <optgroup label="DeepSeek">
+                <option value="deepseek-chat">deepseek-chat（V3.2 非思考模式）</option>
+                <option value="deepseek-reasoner">deepseek-reasoner（V3.2 思考模式）</option>
+              </optgroup>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="label">视觉模型（截图识别用）</label>
+            <select id="vision-model-select" class="input select">
+              <optgroup label="免费模型">
+                <option value="glm-4.6v-flash">glm-4.6V-Flash（免费，推荐）</option>
+                <option value="glm-4.1v-thinking-flash">glm-4.1V-Thinking-Flash（免费推理）</option>
+                <option value="glm-4v-flash">glm-4V-Flash（免费基础）</option>
+              </optgroup>
+              <optgroup label="高性能模型">
+                <option value="glm-4.1v-thinking-flashx">glm-4.1V-Thinking-FlashX（轻量推理）</option>
+                <option value="glm-ocr">glm-OCR（文档解析）</option>
+              </optgroup>
+              <optgroup label="旗舰模型">
+                <option value="glm-4.6v">glm-4.6V（旗舰视觉推理，128K）</option>
+              </optgroup>
+            </select>
+            <div class="form-hint" id="vision-model-hint" style="display:none">当前使用 DeepSeek 时，自动填充只走文本模式，视觉模型不会参与。</div>
+          </div>
+
+          <div class="form-row">
+            <button class="btn btn--secondary" id="btn-test-api">🔌 测试连接</button>
+            <button class="btn btn--primary" id="btn-save-api">保存设置</button>
+          </div>
+
+          <div id="api-test-result" class="test-result hidden"></div>
+        </div>
+
+        <div class="card">
+          <div class="card__title">⚙️ 行为设置</div>
+          <label class="toggle-row">
+            <span>自动检测表单（打开页面时）</span>
+            <input type="checkbox" id="setting-auto-detect" class="toggle">
+          </label>
+          <label class="toggle-row">
+            <span>填充完成后显示通知</span>
+            <input type="checkbox" id="setting-show-notification" class="toggle" checked>
+          </label>
+        </div>
+      </section>
+
+      <!-- ── 填充历史 Tab ─────────────────────────────────────────── -->
+      <section id="tab-history" class="tab-content">
+        <div class="tab-header">
+          <h2 class="tab-title">填充历史</h2>
+          <button class="btn btn--ghost" id="btn-clear-history">🗑 清空历史</button>
+        </div>
+        <div id="history-list" class="history-list"></div>
+      </section>
+
+      <!-- ── 关于 Tab ─────────────────────────────────────────── -->
+      <section id="tab-about" class="tab-content">
+        <div class="tab-header">
+          <h2 class="tab-title">关于 CVmax</h2>
+        </div>
+        <div class="card about-card">
+          <div class="about-logo">📄</div>
+          <h3>CVmax v1.0</h3>
+          <p>智能简历自动填充助手，基于智谱AI GLM 大模型驱动。</p>
+          <div class="about-features">
+            <div class="feature">🔍 自动识别招聘网站表单结构</div>
+            <div class="feature">🤖 AI 语义匹配，精准填充</div>
+            <div class="feature">📸 视觉模式，识别复杂页面</div>
+            <div class="feature">📋 多套简历模板管理</div>
+            <div class="feature">🔒 数据本地存储，不上传简历</div>
+          </div>
+          <p class="about-tip">支持 Boss直聘、拉勾、智联、LinkedIn、Workday 等主流招聘平台</p>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Hidden file inputs -->
+  <input type="file" id="file-import" accept=".json" style="display:none">
+  <input type="file" id="file-pdf" accept=".pdf" style="display:none">
+
+  <script src="lib/pdf.min.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>
