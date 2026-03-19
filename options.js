@@ -9,6 +9,9 @@ let currentResume = null;   // 正在编辑的简历对象
 let allResumes = [];
 let activeResumeId = null;
 let activeCategoryFilter = '';  // 当前分类筛选
+let currentProviderId = 'zhipu-cn';
+
+const modelConfig = globalThis.CVFLASH_MODEL_CONFIG;
 
 // ─── 初始化 ────────────────────────────────────────────────────────────────────
 
@@ -18,15 +21,8 @@ async function init() {
   bindResumeActions();
   bindAPIActions();
   bindHistoryActions();
-
-  // 处理来自 popup 的跳转
-  chrome.runtime.onMessage.addListener((msg) => {
-    if (msg.action === 'EDIT_RESUME' && msg.id) {
-      activateTab('resumes');
-      const resume = allResumes.find(r => r.id === msg.id);
-      if (resume) openEditor(resume);
-    }
-  });
+  await consumeOptionsIntent();
+  bindOptionsIntentListener();
 }
 
 async function loadAll() {
@@ -42,6 +38,39 @@ async function loadAll() {
   renderResumeList();
   loadAPISettings(data);
   renderHistory(data.cvflash_history || []);
+}
+
+async function consumeOptionsIntent() {
+  const data = await chrome.storage.local.get('cvflash_options_intent');
+  const intent = data.cvflash_options_intent;
+  if (!intent) return;
+
+  await chrome.storage.local.remove('cvflash_options_intent');
+  applyOptionsIntent(intent);
+}
+
+function applyOptionsIntent(intent) {
+  if (intent.tab) {
+    activateTab(intent.tab);
+  }
+
+  if (intent.resumeId) {
+    const resume = allResumes.find((item) => item.id === intent.resumeId);
+    if (resume) {
+      activateTab('resumes');
+      openEditor(resume);
+    }
+  }
+}
+
+function bindOptionsIntentListener() {
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local') return;
+    const intent = changes.cvflash_options_intent?.newValue;
+    if (!intent) return;
+    applyOptionsIntent(intent);
+    chrome.storage.local.remove('cvflash_options_intent');
+  });
 }
 
 // ─── Tab 导航 ─────────────────────────────────────────────────────────────────
@@ -85,7 +114,7 @@ function renderResumeList() {
   if (filtered.length === 0) {
     container.innerHTML = `
       <div class="empty-state">
-        <div class="empty-state__icon">📋</div>
+        <div class="empty-state__icon">CV</div>
         <div class="empty-state__text">${allResumes.length === 0 ? '还没有简历，点击「新建简历」或「上传 PDF」开始创建' : '该分类下暂无简历'}</div>
       </div>`;
     return;
@@ -493,39 +522,127 @@ function collectEntries(type) {
 // ─── API 设置 ─────────────────────────────────────────────────────────────────
 
 function loadAPISettings(data) {
-  document.getElementById('api-key-input').value = data.cvflash_api_key || '';
-  const apiBase = data.cvflash_api_base || 'https://api.deepseek.com/v1';
-  document.getElementById('api-base-select').value = apiBase;
-
   const settings = data.cvflash_settings || {};
-  const textModel = document.getElementById('text-model-select');
-  const visionModel = document.getElementById('vision-model-select');
-  if (settings.textModel) textModel.value = settings.textModel;
-  if (settings.visionModel) visionModel.value = settings.visionModel;
+  const storedProvider = modelConfig.getProviderById(
+    settings.providerId || modelConfig.resolveProviderByBase(data.cvflash_api_base || '').id
+  );
+
+  currentProviderId = storedProvider.id;
+  document.getElementById('api-key-input').value = data.cvflash_api_key || '';
   document.getElementById('setting-auto-detect').checked = settings.autoDetect ?? true;
   document.getElementById('setting-show-notification').checked = settings.showNotification ?? true;
-  updateVisionModelState(apiBase);
+
+  renderProviderGrid();
+  applyProviderSelection(storedProvider.id, {
+    preserveBase: true,
+    preserveTextModel: true,
+    preserveVisionModel: true
+  });
+
+  document.getElementById('api-base-select').value = data.cvflash_api_base || storedProvider.base;
+  document.getElementById('text-model-select').value =
+    settings.textModel || modelConfig.pickDefaultTextModel(storedProvider.id);
+  document.getElementById('vision-model-select').value =
+    settings.visionModel || modelConfig.pickDefaultVisionModel(storedProvider.id);
+
+  updateProviderSummary();
+  updateProviderHints();
 }
 
-function updateVisionModelState(apiBase) {
+function renderProviderGrid() {
+  const container = document.getElementById('provider-grid');
+  container.innerHTML = modelConfig.providers.map((provider) => `
+    <button type="button" class="provider-card ${provider.id === currentProviderId ? 'active' : ''}" data-provider-id="${provider.id}">
+      <span class="provider-card__eyebrow">${escapeHtml(provider.shortLabel)}</span>
+      <span class="provider-card__name">${escapeHtml(provider.label)}</span>
+      <span class="provider-card__meta">${escapeHtml((provider.tags || []).slice(0, 3).join(' · '))}</span>
+    </button>
+  `).join('');
+}
+
+function renderModelSuggestions(listId, groups) {
+  const list = document.getElementById(listId);
+  const options = modelConfig.flattenModelGroups(groups);
+  list.innerHTML = options.map((option) =>
+    `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label || option.value)}</option>`
+  ).join('');
+}
+
+function updateProviderSummary() {
+  const provider = modelConfig.getProviderById(currentProviderId);
+  const summary = document.getElementById('provider-summary');
+  const apiBase = document.getElementById('api-base-select').value.trim() || provider.base;
+  const tags = (provider.tags || []).map((tag) => `<span class="provider-summary__tag">${escapeHtml(tag)}</span>`).join('');
+  const compatibility = provider.apiKind === 'anthropic' ? 'Anthropic Messages API' : 'OpenAI-compatible Chat Completions';
+
+  summary.innerHTML = `
+    <div class="provider-summary__header">
+      <div>
+        <div class="provider-summary__title">${escapeHtml(provider.label)}</div>
+        <div class="provider-summary__text">${escapeHtml(provider.description)}</div>
+      </div>
+      <div class="provider-summary__tags">${tags}</div>
+    </div>
+    <div class="provider-summary__meta">
+      <span>协议：${escapeHtml(compatibility)}</span>
+      <span>${provider.requiresKey ? '需要 API Key' : '可无 Key 使用'}</span>
+      <span>${provider.supportsVision ? '支持视觉输入' : '文本链路优先'}</span>
+    </div>
+    <div class="provider-summary__endpoint">${escapeHtml(apiBase)}</div>
+  `;
+}
+
+function updateProviderHints() {
+  const provider = modelConfig.getProviderById(currentProviderId);
+  const keyHint = document.getElementById('api-key-hint');
+  const baseHint = document.getElementById('api-base-hint');
+  const textHint = document.getElementById('text-model-hint');
+
+  keyHint.textContent = provider.requiresKey
+    ? `${provider.label} 需要有效的 API Key。`
+    : `${provider.label} 通常可以留空；如果你的本地代理要求鉴权，也可以填写任意占位 token。`;
+  baseHint.textContent = provider.customBase
+    ? '这是自定义接口，请填写你的代理或本地服务地址。'
+    : `当前预设接口会自动切到 ${provider.base}，你也可以手工覆盖。`;
+  textHint.textContent = provider.customBase
+    ? '这里推荐直接填写你代理真实暴露的模型 ID。'
+    : '列表是推荐值，你也可以直接填任意模型 ID。';
+
+  updateVisionModelState(provider);
+}
+
+function updateVisionModelState(provider) {
   const visionModelSelect = document.getElementById('vision-model-select');
   const visionHint = document.getElementById('vision-model-hint');
-  const isDeepSeek = apiBase.includes('deepseek.com');
-
-  visionModelSelect.disabled = isDeepSeek;
-  visionHint.style.display = isDeepSeek ? 'block' : 'none';
+  visionModelSelect.disabled = !provider.supportsVision;
+  visionHint.textContent = provider.supportsVision
+    ? '如果当前模型本身支持图像输入，也可以与文本模型保持一致。'
+    : '当前供应商不建议单独配置视觉模型，扩展会优先走文本链路。';
 }
 
 function bindAPIActions() {
   document.getElementById('btn-toggle-key').addEventListener('click', () => {
     const input = document.getElementById('api-key-input');
     input.type = input.type === 'password' ? 'text' : 'password';
+    document.getElementById('btn-toggle-key').textContent = input.type === 'password' ? '显示' : '隐藏';
+  });
+
+  document.getElementById('provider-grid').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-provider-id]');
+    if (!button) return;
+    applyProviderSelection(button.dataset.providerId);
+  });
+
+  document.getElementById('api-base-select').addEventListener('change', () => {
+    updateProviderSummary();
   });
 
   document.getElementById('btn-save-api').addEventListener('click', async () => {
+    const provider = modelConfig.getProviderById(currentProviderId);
     const apiKey = document.getElementById('api-key-input').value.trim();
     const apiBase = document.getElementById('api-base-select').value;
     const settings = {
+      providerId: currentProviderId,
       textModel: document.getElementById('text-model-select').value,
       visionModel: document.getElementById('vision-model-select').value,
       autoDetect: document.getElementById('setting-auto-detect').checked,
@@ -536,6 +653,9 @@ function bindAPIActions() {
       cvflash_api_base: apiBase,
       cvflash_settings: settings
     });
+    if (!provider.requiresKey || apiKey) {
+      updateProviderSummary();
+    }
     showNotify('设置已保存！');
   });
 
@@ -548,29 +668,39 @@ function bindAPIActions() {
     resultEl.className = 'test-result';
     resultEl.classList.remove('hidden');
 
-    const resp = await chrome.runtime.sendMessage({ action: 'TEST_API', apiKey, apiBase });
+    const resp = await chrome.runtime.sendMessage({ action: 'TEST_API', apiKey, apiBase, providerId: currentProviderId });
     resultEl.textContent = resp.success ? '✓ ' + resp.message : '✗ ' + resp.message;
     resultEl.classList.add(resp.success ? 'success' : 'error');
   });
+}
 
-  // 自动切换默认模型（当选择不同 API 提供商时）
-  document.getElementById('api-base-select').addEventListener('change', (e) => {
-    const apiBase = e.target.value;
-    const textModelSelect = document.getElementById('text-model-select');
-    const visionModelSelect = document.getElementById('vision-model-select');
+function applyProviderSelection(providerId, options = {}) {
+  currentProviderId = providerId;
+  const provider = modelConfig.getProviderById(providerId);
+  const preserveBase = options.preserveBase ?? false;
+  const preserveTextModel = options.preserveTextModel ?? false;
+  const preserveVisionModel = options.preserveVisionModel ?? false;
 
-    if (apiBase.includes('deepseek.com')) {
-      // 切换到 DeepSeek 时的默认模型（填充仅使用文本模型）
-      textModelSelect.value = 'deepseek-chat';
-      visionModelSelect.value = 'glm-4.6v-flash';
-    } else if (apiBase.includes('bigmodel.cn') || apiBase.includes('api.z.ai')) {
-      // 切换到智谱时的默认模型
-      textModelSelect.value = 'glm-4.7-flash';
-      visionModelSelect.value = 'glm-4.6v-flash';
+  renderProviderGrid();
+  renderModelSuggestions('text-model-list', provider.textModelGroups);
+  renderModelSuggestions('vision-model-list', provider.visionModelGroups);
+
+  if (!preserveBase) {
+    document.getElementById('api-base-select').value = provider.base;
+  }
+  if (!preserveTextModel || !document.getElementById('text-model-select').value.trim()) {
+    document.getElementById('text-model-select').value = modelConfig.pickDefaultTextModel(providerId);
+  }
+  if (provider.supportsVision) {
+    if (!preserveVisionModel || !document.getElementById('vision-model-select').value.trim()) {
+      document.getElementById('vision-model-select').value = modelConfig.pickDefaultVisionModel(providerId);
     }
+  } else if (!preserveVisionModel) {
+    document.getElementById('vision-model-select').value = '';
+  }
 
-    updateVisionModelState(apiBase);
-  });
+  updateProviderSummary();
+  updateProviderHints();
 }
 
 // ─── 填充历史 ─────────────────────────────────────────────────────────────────
@@ -578,7 +708,7 @@ function bindAPIActions() {
 function renderHistory(history) {
   const container = document.getElementById('history-list');
   if (history.length === 0) {
-    container.innerHTML = '<div class="empty-state"><div class="empty-state__icon">📜</div><div class="empty-state__text">暂无填充记录</div></div>';
+    container.innerHTML = '<div class="empty-state"><div class="empty-state__icon">记录</div><div class="empty-state__text">暂无填充记录</div></div>';
     return;
   }
   container.innerHTML = history.map(h => `
@@ -624,7 +754,11 @@ async function handleBatchPDFUpload(files) {
   // 先检查 API Key
   const storageData = await chrome.storage.local.get(['cvflash_api_key', 'cvflash_api_base', 'cvflash_settings']);
   const apiKey = storageData.cvflash_api_key || '';
-  if (!apiKey) {
+  const settings = storageData.cvflash_settings || {};
+  const provider = modelConfig.getProviderById(
+    settings.providerId || modelConfig.resolveProviderByBase(storageData.cvflash_api_base || '').id
+  );
+  if (provider.requiresKey && !apiKey) {
     alert('请先在「API 设置」中填写 API Key，再上传 PDF');
     return;
   }
@@ -639,7 +773,7 @@ async function handleBatchPDFUpload(files) {
   function renderBatchList() {
     if (!isBatch) return;
     batchEl.innerHTML = results.map((r, i) => {
-      const icon = r.status === 'done' ? '✓' : r.status === 'error' ? '✗' : r.status === 'scan' ? '⚠' : '⏳';
+      const icon = r.status === 'done' ? '完成' : r.status === 'error' ? '失败' : r.status === 'scan' ? '跳过' : '进行中';
       const cls = r.status === 'done' ? 'done' : r.status === 'error' ? 'error' : 'active';
       const label = r.status === 'done'
         ? `${r.file.name} — ${r.resume?.personal?.name || '解析成功'}`
@@ -661,7 +795,6 @@ async function handleBatchPDFUpload(files) {
 
   // 动态导入一次
   const { extractTextFromPDF } = await import('./lib/pdf-parser.js');
-  const settings = storageData.cvflash_settings || {};
 
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
@@ -717,6 +850,7 @@ async function handleBatchPDFUpload(files) {
         imageDataUrl: null,
         apiKey,
         apiBase: storageData.cvflash_api_base,
+        providerId: settings.providerId,
         textModel: settings.textModel,
         visionModel: settings.visionModel
       });
@@ -821,7 +955,7 @@ function showNotify(msg) {
   if (!el) {
     el = document.createElement('div');
     el.id = 'cvflash-notify';
-    el.style.cssText = 'position:fixed;bottom:24px;right:24px;background:#1e2e1e;border:1px solid rgba(166,227,161,.3);color:#a6e3a1;padding:10px 18px;border-radius:8px;font-size:13px;z-index:9999;transition:opacity .2s';
+    el.style.cssText = 'position:fixed;bottom:24px;right:24px;background:rgba(255,251,244,.94);border:1px solid rgba(43,107,82,.16);color:#2b6b52;padding:12px 18px;border-radius:16px;font-size:13px;box-shadow:0 18px 36px rgba(25,34,45,.12);z-index:9999;transition:opacity .2s';
     document.body.appendChild(el);
   }
   el.textContent = msg;

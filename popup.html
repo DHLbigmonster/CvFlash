@@ -8,54 +8,61 @@
 </head>
 <body>
   <div class="app">
-    <!-- Header -->
     <header class="header">
       <div class="header__logo">
-        <span class="header__icon">📄</span>
-        <span class="header__title">CVflash</span>
+        <span class="header__mark" aria-hidden="true"></span>
+        <div>
+          <div class="header__title">CVflash</div>
+          <div class="header__subtitle">Resume Autofill Studio</div>
+        </div>
       </div>
-      <button class="icon-btn" id="btn-settings" title="设置">⚙️</button>
+      <button class="icon-btn" id="btn-settings" title="设置" aria-label="打开设置">设置</button>
     </header>
 
-    <!-- Resume Section -->
-    <div class="resume-section">
+    <section class="hero-panel">
+      <div class="hero-panel__eyebrow">当前工作台</div>
+      <div class="hero-panel__title">在当前招聘页面完成一次干净的自动填充。</div>
+      <div class="meta-strip">
+        <span id="popup-provider" class="meta-pill">未配置模型</span>
+        <span id="popup-model" class="meta-pill meta-pill--soft">等待设置</span>
+      </div>
+    </section>
+
+    <section class="resume-section">
       <div class="section__label">当前简历</div>
       <div id="popup-cat-tabs" class="popup-cat-tabs"></div>
       <div class="resume-selector">
         <select id="resume-select" class="select">
           <option value="">— 请先添加简历 —</option>
         </select>
-        <button class="icon-btn" id="btn-edit-resume" title="编辑简历">✏️</button>
+        <button class="icon-btn" id="btn-edit-resume" title="编辑简历" aria-label="编辑当前简历">编辑</button>
       </div>
-    </div>
+    </section>
 
-    <!-- Page Status -->
-    <div class="page-status">
+    <section class="page-status">
+      <div class="section__label">页面状态</div>
       <div class="page-status__main">
-        <span id="page-title" class="page-title">—</span>
+        <div class="page-status__text">
+          <span id="page-title" class="page-title">—</span>
+          <span class="page-caption">先检测字段，再执行自动填充。</span>
+        </div>
         <span id="field-badge" class="field-badge field-badge--gray">未检测</span>
       </div>
-    </div>
+    </section>
 
-    <!-- Main Actions -->
-    <div class="main-actions">
+    <section class="main-actions">
       <button class="action-btn action-btn--secondary" id="btn-detect">
-        <span class="action-btn__icon">🔍</span>
         <span>检测表单</span>
+        <span class="action-btn__hint">分析当前页面</span>
       </button>
       <button class="action-btn action-btn--primary" id="btn-fill" disabled>
-        <span class="action-btn__icon">⚡</span>
         <span>AI 自动填充</span>
+        <span class="action-btn__hint">按当前简历写入</span>
       </button>
-    </div>
+    </section>
 
-    <!-- Vision Mode -->
-    <button class="vision-btn" id="btn-vision">
-      <span class="vision-btn__icon">📸</span>
-      <span>截图识别填充（视觉模式）</span>
-    </button>
+    <button class="vision-btn" id="btn-vision">使用视觉模式补充识别</button>
 
-    <!-- Status/Error Display -->
     <div id="status-message" class="status-message hidden">
       <div class="status-message__content">
         <span id="status-text">处理中...</span>
@@ -63,23 +70,21 @@
       </div>
     </div>
 
-    <!-- Error Display -->
     <div id="error-message" class="error-message hidden">
-      <span id="error-text">填充失败: AI 返回格式异常: 未找到 JSON 结束标记</span>
+      <span id="error-text">填充失败</span>
     </div>
 
-    <!-- API Warning -->
     <div id="no-api-warning" class="api-warning hidden">
-      ⚠️ 请先<a href="#" id="warn-goto-settings">设置 API Key</a>才能使用 AI 功能
+      请先<a href="#" id="warn-goto-settings">完成模型设置</a>后再使用自动填充。
     </div>
 
-    <!-- Footer -->
     <footer class="footer">
-      <span>雷电霸王简历</span>
+      <span>简历、本地设置与历史记录都保存在浏览器中。</span>
       <a href="#" id="btn-history">填充历史</a>
     </footer>
   </div>
 
+  <script src="lib/model-config.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

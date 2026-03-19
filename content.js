@@ -90,6 +90,7 @@ const IGNORED_INPUT_TYPES = new Set([
  */
 function collectAllFields(root) {
   const fields = [];
+  const scannedElements = [];
   let domIndex = 0;
 
   function walk(node) {
@@ -99,6 +100,7 @@ function collectAllFields(root) {
       if (!isInteractable(el)) return;
       if (el.dataset.cvflashScanned) return;
       el.dataset.cvflashScanned = '1';
+      scannedElements.push(el);
 
       const field = buildFieldDescriptor(el, domIndex++);
       if (field) fields.push(field);
@@ -110,6 +112,7 @@ function collectAllFields(root) {
       if (el.dataset.cvflashScanned) return;
       if (el.tagName === 'BODY' || el.closest('[data-cvflash-scanned]')) return;
       el.dataset.cvflashScanned = '1';
+      scannedElements.push(el);
 
       const field = buildFieldDescriptor(el, domIndex++, 'contenteditable');
       if (field) fields.push(field);
@@ -121,6 +124,7 @@ function collectAllFields(root) {
       if (el.dataset.cvflashScanned) return;
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)) return; // 已处理
       el.dataset.cvflashScanned = '1';
+      scannedElements.push(el);
 
       const field = buildFieldDescriptor(el, domIndex++, 'aria-' + (el.getAttribute('role') || 'textbox'));
       if (field) fields.push(field);
@@ -150,7 +154,7 @@ function collectAllFields(root) {
   walk(root);
 
   // 清除扫描标记以允许下次重扫
-  document.querySelectorAll('[data-cvflash-scanned]').forEach(el => {
+  scannedElements.forEach(el => {
     delete el.dataset.cvflashScanned;
   });
 

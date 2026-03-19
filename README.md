@@ -1,4 +1,4 @@
-# CVflash · 雷电霸王简历 ⚡
+# CVflash · 雷电霸王简历
 
 > AI 驱动的校招表单自动填充 Chrome 插件，让投简历快如闪电。
 
@@ -24,13 +24,19 @@
 
 ## 使用前配置
 
-插件需要一个支持 OpenAI 兼容接口的 API Key：
+插件支持多种模型入口：
 
 - **智谱 GLM**（推荐，有免费额度）：[open.bigmodel.cn](https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys)
 - **DeepSeek**：[platform.deepseek.com](https://platform.deepseek.com/api_keys)
+- **OpenAI / ChatGPT**：[platform.openai.com](https://platform.openai.com/)
+- **Google Gemini**：[ai.google.dev](https://ai.google.dev/)
+- **Anthropic Claude**：[console.anthropic.com](https://console.anthropic.com/)
+- **OpenRouter**：[openrouter.ai](https://openrouter.ai/)
+- **本地模型**：支持 Ollama、LM Studio、自定义 OpenAI 兼容网关、自定义 Anthropic 兼容网关
 
-1. 点击插件图标 → 右上角齿轮 ⚙️ 进入设置
-2. 在「API 设置」中填入 API Key，选择对应 API 地址
+1. 点击插件图标 → 进入设置
+2. 在「模型与接口」中选择供应商预设
+3. 填入 API Key 或本地接口地址
 3. 点击「测试连接」验证
 
 ## 使用方法
@@ -46,7 +52,7 @@
 
 - Chrome Extension Manifest V3
 - PDF.js（本地 PDF 解析）
-- OpenAI 兼容 API（智谱 GLM / DeepSeek）
+- OpenAI-compatible / Anthropic Messages API
 - 纯原生 JS，无框架依赖
 
 ## 隐私说明

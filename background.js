@@ -3,11 +3,15 @@
  * 负责 AI API 调用（避免 CSP 限制）、消息路由、截图捕获
  */
 
+import './lib/model-config.js';
+
 const API_BASES = {
   cn: 'https://open.bigmodel.cn/api/paas/v4',
   global: 'https://api.z.ai/api/paas/v4',
   deepseek: 'https://api.deepseek.com/v1'
 };
+
+const modelConfig = globalThis.CVFLASH_MODEL_CONFIG;
 
 // ─── 消息路由 ─────────────────────────────────────────────────────────────────
 
@@ -46,6 +50,23 @@ async function sendToTab(tabId, message) {
   }
 }
 
+function resolveProvider(providerId, apiBase) {
+  if (providerId) {
+    const provider = modelConfig.providers.find((item) => item.id === providerId);
+    if (provider) return provider;
+  }
+  return modelConfig.resolveProviderByBase(apiBase || API_BASES.cn);
+}
+
+function resolveDefaultModel(providerId, apiBase) {
+  return modelConfig.pickDefaultTextModel(providerId || apiBase || API_BASES.cn);
+}
+
+function normalizeAuthToken(apiKey, provider) {
+  if (apiKey) return apiKey;
+  return provider.requiresKey ? '' : 'local-token';
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   switch (msg.action) {
     case 'AI_MATCH_FIELDS':
@@ -67,7 +88,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
 
     case 'TEST_API':
-      testAPIConnection(msg.apiKey, msg.apiBase).then(sendResponse).catch(e => sendResponse({ success: false, message: e.message }));
+      testAPIConnection(msg.apiKey, msg.apiBase, msg.providerId).then(sendResponse).catch(e => sendResponse({ success: false, message: e.message }));
       return true;
 
     case 'PARSE_PDF_RESUME':
@@ -83,7 +104,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // ─── 完整填充流程（在 background 中运行，不受 popup 关闭影响）────────────────
 
-async function handleFullFill({ tabId, resume, apiKey, apiBase, model }) {
+async function handleFullFill({ tabId, resume, apiKey, apiBase, providerId, model }) {
   try {
     // 1. 检测字段
     updateFillStatus('detecting', '正在检测表单字段...', 10);
@@ -134,6 +155,7 @@ async function handleFullFill({ tabId, resume, apiKey, apiBase, model }) {
         resume,
         apiKey,
         apiBase,
+        providerId,
         model,
         sectionContext: sectionName
       });
@@ -542,16 +564,18 @@ function matchFieldByRules(field, resume, groupIndex = 0) {
 
 // ─── AI 字段匹配（纯文本模式）────────────────────────────────────────────────
 
-async function handleAIMatch({ fields, resume, apiKey, apiBase, model, sectionContext = '' }) {
-  if (!apiKey) throw new Error('未配置 API Key，请先前往设置页面填写');
-
+async function handleAIMatch({ fields, resume, apiKey, apiBase, providerId, model, sectionContext = '' }) {
   const base = apiBase || API_BASES.cn;
+  const provider = resolveProvider(providerId, base);
+  const authToken = normalizeAuthToken(apiKey, provider);
+  if (!authToken) throw new Error('未配置 API Key，请先前往设置页面填写');
   const resumeSummary = buildResumeSummary(resume);
 
   console.log('=== 开始 AI 字段匹配 ===');
   console.log(`分区: ${sectionContext || '全表单'}`);
   console.log(`字段数量: ${fields.length}`);
   console.log(`API 端点: ${base}`);
+  console.log(`供应商: ${provider.label}`);
   console.log(`使用模型: ${model || 'default'}`);
 
   const structuredPrompt = buildStructuredFieldPrompt(fields);
@@ -563,19 +587,19 @@ async function handleAIMatch({ fields, resume, apiKey, apiBase, model, sectionCo
   }];
 
   console.log('准备调用 API...');
-  const defaultModel = base?.includes('deepseek.com') ? 'deepseek-chat' : 'glm-4.7-flash';
-  const resolvedModel = resolveFieldMatchModel(base, model || defaultModel);
+  const defaultModel = resolveDefaultModel(provider.id, base);
+  const resolvedModel = resolveFieldMatchModel(provider, model || defaultModel);
   const requestOpts = {
     temperature: 0.25,
     max_tokens: 4096,
     timeout: 90000,
-    response_format: buildJsonResponseFormat(base)
+    response_format: buildJsonResponseFormat(provider, base)
   };
 
   // 智能降级：先尝试完整 prompt，超时后降级到简化 prompt
   let response;
   try {
-    response = await callChatAPI(base, apiKey, resolvedModel, messages, requestOpts);
+    response = await callChatAPI(base, authToken, provider, resolvedModel, messages, requestOpts);
   } catch (error) {
     // 检查是否是超时错误
     if (error.message.includes('超时') || error.message.includes('timeout')) {
@@ -589,7 +613,7 @@ async function handleAIMatch({ fields, resume, apiKey, apiBase, model, sectionCo
         content: simplifiedPrompt
       }];
 
-      response = await callChatAPI(base, apiKey, resolvedModel, simplifiedMessages, {
+      response = await callChatAPI(base, authToken, provider, resolvedModel, simplifiedMessages, {
         ...requestOpts,
         timeout: 60000
       });
@@ -602,7 +626,7 @@ async function handleAIMatch({ fields, resume, apiKey, apiBase, model, sectionCo
   let fieldMap = parseFillResponse(response, fields);
   if (!Object.keys(fieldMap).length && typeof response === 'string' && response.trim()) {
     updateFillStatus('matching', '正在修正 AI 返回格式...', 55);
-    const repairedResponse = await repairFillResponse(base, apiKey, resolvedModel, response);
+    const repairedResponse = await repairFillResponse(base, authToken, provider, resolvedModel, response);
     fieldMap = parseFillResponse(repairedResponse, fields);
   }
 
@@ -610,7 +634,7 @@ async function handleAIMatch({ fields, resume, apiKey, apiBase, model, sectionCo
   if (unresolvedFields.length > 0 && unresolvedFields.length < fields.length) {
     try {
       updateFillStatus('matching', `AI 正在二次校准剩余 ${unresolvedFields.length} 个字段...`, 62);
-      const refineResponse = await callChatAPI(base, apiKey, resolvedModel, [{
+      const refineResponse = await callChatAPI(base, authToken, provider, resolvedModel, [{
         role: 'user',
         content: buildFocusedFillPrompt(unresolvedFields, resumeSummary, fields, fieldMap)
       }], {
@@ -802,21 +826,22 @@ ${resumeSummary.slice(0, 2000)}
 /**
  * 深度匹配场景强制使用稳定的文本模型
  */
-function resolveFieldMatchModel(base, model) {
-  if (base?.includes('deepseek.com') && model === 'deepseek-reasoner') {
+function resolveFieldMatchModel(provider, model) {
+  if (provider.id === 'deepseek' && model === 'deepseek-reasoner') {
     return 'deepseek-chat';
   }
   return model;
 }
 
-function buildJsonResponseFormat(base) {
+function buildJsonResponseFormat(provider, base) {
+  if (provider.apiKind !== 'openai') return undefined;
   if (base?.includes('deepseek.com')) {
     return { type: 'json_object' };
   }
   return undefined;
 }
 
-async function repairFillResponse(base, apiKey, model, rawResponse) {
+async function repairFillResponse(base, apiKey, provider, model, rawResponse) {
   const prompt = [
     '请将下面内容整理成一个纯 JSON 对象。',
     '要求：',
@@ -828,11 +853,11 @@ async function repairFillResponse(base, apiKey, model, rawResponse) {
     rawResponse.slice(0, 6000)
   ].join('\n');
 
-  return callChatAPI(base, apiKey, model, [{ role: 'user', content: prompt }], {
+  return callChatAPI(base, apiKey, provider, model, [{ role: 'user', content: prompt }], {
     temperature: 0,
     max_tokens: 2048,
     timeout: 30000,
-    response_format: buildJsonResponseFormat(base)
+    response_format: buildJsonResponseFormat(provider, base)
   });
 }
 
@@ -1031,16 +1056,14 @@ function validateFieldValue(value, field) {
 
 // ─── 通用 AI 对话 ─────────────────────────────────────────────────────────────
 
-async function handleAIChat({ messages, apiKey, apiBase, model, temperature, maxTokens }) {
-  if (!apiKey) throw new Error('未配置 API Key');
+async function handleAIChat({ messages, apiKey, apiBase, providerId, model, temperature, maxTokens }) {
   const base = apiBase || API_BASES.cn;
-  // 智能选择默认模型
-  let defaultModel = 'glm-4.7-flash';
-  if (base && base.includes('deepseek.com')) {
-    defaultModel = 'deepseek-chat';
-  }
+  const provider = resolveProvider(providerId, base);
+  const authToken = normalizeAuthToken(apiKey, provider);
+  if (!authToken) throw new Error('未配置 API Key');
+  const defaultModel = resolveDefaultModel(provider.id, base);
 
-  const content = await callChatAPI(base, apiKey, model || defaultModel, messages, {
+  const content = await callChatAPI(base, authToken, provider, model || defaultModel, messages, {
     temperature: temperature ?? 0.7,
     max_tokens: maxTokens || 2048
   });
@@ -1049,13 +1072,11 @@ async function handleAIChat({ messages, apiKey, apiBase, model, temperature, max
 
 // ─── PDF 简历解析 ─────────────────────────────────────────────────────────────
 
-async function handleParsePDF({ extractedText, imageDataUrl, apiKey, apiBase, textModel, visionModel }) {
+async function handleParsePDF({ extractedText, imageDataUrl, apiKey, apiBase, providerId, textModel, visionModel }) {
   const base = apiBase || API_BASES.cn;
-  // 根据 API 提供商选择默认模型
-  let defaultModel = 'glm-4.7-flash';
-  if (base && base.includes('deepseek.com')) {
-    defaultModel = 'deepseek-chat';
-  }
+  const provider = resolveProvider(providerId, base);
+  const authToken = normalizeAuthToken(apiKey, provider);
+  const defaultModel = resolveDefaultModel(provider.id, base);
   const model = textModel || defaultModel;
 
   let resumeText = extractedText || '';
@@ -1066,7 +1087,7 @@ async function handleParsePDF({ extractedText, imageDataUrl, apiKey, apiBase, te
   }
 
   // ── 策略：始终优先 AI 解析，本地仅作兜底 ────────────────────────────────────
-  if (apiKey) {
+  if (authToken) {
     try {
       const parsePrompt = `你是一位专业的简历解析专家。请将以下简历文本**完整、精确、不遗漏地**解析为 JSON 格式。
 
@@ -1174,7 +1195,7 @@ ${resumeText.slice(0, 8000)}
   ]
 }`;
 
-      const response = await callChatAPI(base, apiKey, model, [
+      const response = await callChatAPI(base, authToken, provider, model, [
         { role: 'user', content: parsePrompt }
       ], { temperature: 0.05, max_tokens: 4096, timeout: 45000, maxRetries: 1 });
 
@@ -1547,20 +1568,18 @@ function validateAndCleanResume(resume) {
 
 // ─── API 连接测试 ─────────────────────────────────────────────────────────────
 
-async function testAPIConnection(apiKey, apiBase) {
-  if (!apiKey) return { success: false, message: '请先填写 API Key' };
+async function testAPIConnection(apiKey, apiBase, providerId) {
   try {
     const base = apiBase || API_BASES.cn;
-
-    // 根据 API 提供商选择合适的测试模型
-    let testModel = 'glm-4.7-flash'; // 智谱默认
-    if (base.includes('deepseek.com')) {
-      testModel = 'deepseek-chat';
-    }
+    const provider = resolveProvider(providerId, base);
+    const authToken = normalizeAuthToken(apiKey, provider);
+    if (!authToken) return { success: false, message: '请先填写 API Key' };
+    const testModel = resolveDefaultModel(provider.id, base);
 
     const content = await callChatAPI(
       base,
-      apiKey,
+      authToken,
+      provider,
       testModel,
       [{ role: 'user', content: '你好，请只回复"连接成功"这四个字。' }],
       { temperature: 0, max_tokens: 16 }
@@ -1573,7 +1592,27 @@ async function testAPIConnection(apiKey, apiBase) {
 
 // ─── HTTP 工具 ────────────────────────────────────────────────────────────────
 
-async function callChatAPI(base, apiKey, model, messages, opts = {}) {
+function buildChatEndpoint(base, provider) {
+  const normalized = String(base || '').replace(/\/$/, '');
+
+  if (provider.apiKind === 'anthropic') {
+    if (normalized.endsWith('/messages')) return normalized;
+    return normalized.endsWith('/v1') ? `${normalized}/messages` : `${normalized}/v1/messages`;
+  }
+
+  if (normalized.endsWith('/chat/completions')) return normalized;
+  if (normalized.endsWith('/v1') || normalized.endsWith('/openai')) return `${normalized}/chat/completions`;
+  return `${normalized}/v1/chat/completions`;
+}
+
+function normalizeAnthropicMessages(messages) {
+  return (messages || []).map((message) => ({
+    role: message.role === 'assistant' ? 'assistant' : 'user',
+    content: typeof message.content === 'string' ? message.content : String(message.content || '')
+  }));
+}
+
+async function callChatAPI(base, apiKey, provider, model, messages, opts = {}) {
   const maxRetries = opts.maxRetries ?? 3;
   const timeoutMs = opts.timeout || 60000;
   let lastError;
@@ -1585,29 +1624,43 @@ async function callChatAPI(base, apiKey, model, messages, opts = {}) {
         setTimeout(() => reject(new Error(`API 请求超时（${timeoutMs / 1000}秒）`)), timeoutMs);
       });
 
-      const fetchPromise = fetch(`${base}/chat/completions`, {
+      const endpoint = buildChatEndpoint(base, provider);
+      const fetchPromise = fetch(endpoint, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
-        },
-        body: JSON.stringify({
-          model,
-          messages,
-          temperature: opts.temperature ?? 0.3,
-          max_tokens: opts.max_tokens || 2048,
-          stream: false,
-          ...(opts.response_format ? { response_format: opts.response_format } : {})
-        })
+        headers: provider.apiKind === 'anthropic'
+          ? {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01'
+          }
+          : {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+          },
+        body: JSON.stringify(provider.apiKind === 'anthropic'
+          ? {
+            model,
+            messages: normalizeAnthropicMessages(messages),
+            temperature: opts.temperature ?? 0.3,
+            max_tokens: opts.max_tokens || 2048
+          }
+          : {
+            model,
+            messages,
+            temperature: opts.temperature ?? 0.3,
+            max_tokens: opts.max_tokens || 2048,
+            stream: false,
+            ...(opts.response_format ? { response_format: opts.response_format } : {})
+          })
       });
 
       const response = await Promise.race([fetchPromise, timeoutPromise]);
 
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
-        const msg = err.error?.message || response.statusText;
+        const msg = err.error?.message || err.message || response.statusText;
 
-        if (response.status === 401) {
+        if (response.status === 401 || response.status === 403) {
           throw new Error('API Key 无效或已过期，请检查设置');
         }
 
@@ -1622,7 +1675,7 @@ async function callChatAPI(base, apiKey, model, messages, opts = {}) {
         }
 
         // 更详细的错误信息，特别是 DeepSeek API
-        if (base.includes('deepseek.com') && response.status === 400) {
+        if (provider.id === 'deepseek' && response.status === 400) {
           console.warn('DeepSeek API 详细错误:', { status: response.status, error: err, model });
           throw new Error(`DeepSeek API 错误: ${msg}\n模型: ${model}\n状态: ${response.status}\n详情: ${JSON.stringify(err)}`);
         }
@@ -1630,7 +1683,9 @@ async function callChatAPI(base, apiKey, model, messages, opts = {}) {
       }
 
       const data = await response.json();
-      const content = data?.choices?.[0]?.message?.content;
+      const content = provider.apiKind === 'anthropic'
+        ? data?.content?.find((item) => item?.type === 'text')?.text
+        : data?.choices?.[0]?.message?.content;
       if (typeof content !== 'string') {
         throw new Error('API 返回内容为空或格式异常');
       }

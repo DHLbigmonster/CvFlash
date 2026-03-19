@@ -13,6 +13,8 @@ const btnHistory = document.getElementById('btn-history');
 const warnGotoSettings = document.getElementById('warn-goto-settings');
 const pageTitle = document.getElementById('page-title');
 const fieldBadge = document.getElementById('field-badge');
+const providerBadge = document.getElementById('popup-provider');
+const modelBadge = document.getElementById('popup-model');
 const statusMessage = document.getElementById('status-message');
 const errorMessage = document.getElementById('error-message');
 const statusSpinner = document.getElementById('status-spinner');
@@ -25,6 +27,8 @@ let activeResume = null;
 let apiKey = '';
 let apiBase = '';
 let settings = {};
+
+const modelConfig = globalThis.CVFLASH_MODEL_CONFIG;
 
 // ─── 分类 Tab + 简历下拉渲染 ─────────────────────────────────────────────────
 
@@ -81,15 +85,26 @@ async function init() {
 
   apiKey = data.cvflash_api_key || '';
   apiBase = data.cvflash_api_base || '';
-  settings = data.cvflash_settings || { textModel: 'glm-4.7-flash', visionModel: 'glm-4.6v-flash' };
+  settings = data.cvflash_settings || {
+    providerId: 'zhipu-cn',
+    textModel: modelConfig.pickDefaultTextModel('zhipu-cn'),
+    visionModel: modelConfig.pickDefaultVisionModel('zhipu-cn')
+  };
 
   // 填充简历下拉列表（含分类 tab）
   const resumes = data.cvflash_resumes || [];
   renderCategoryTabs(resumes, data.cvflash_active_resume);
 
-  // API Key 检查
-  if (!apiKey) {
+  const provider = modelConfig.getProviderById(
+    settings.providerId || modelConfig.resolveProviderByBase(apiBase || '').id
+  );
+  providerBadge.textContent = provider.label;
+  modelBadge.textContent = settings.textModel || '未设置模型';
+
+  if (!apiKey && provider.requiresKey) {
     noApiWarning.classList.remove('hidden');
+  } else {
+    noApiWarning.classList.add('hidden');
   }
 
   // 获取当前标签页信息
@@ -124,20 +139,15 @@ async function init() {
 
 // ─── 事件绑定 ─────────────────────────────────────────────────────────────────
 
-btnSettings.addEventListener('click', () => chrome.runtime.openOptionsPage());
-warnGotoSettings.addEventListener('click', (e) => { e.preventDefault(); chrome.runtime.openOptionsPage(); });
+btnSettings.addEventListener('click', () => openOptionsIntent({ tab: 'api' }));
+warnGotoSettings.addEventListener('click', (e) => {
+  e.preventDefault();
+  openOptionsIntent({ tab: 'api' });
+});
 
-btnEditResume.addEventListener('click', () => {
+btnEditResume.addEventListener('click', async () => {
   const id = resumeSelect.value;
-  chrome.runtime.openOptionsPage();
-  // 传递要编辑的 id（通过 URL hash 简单实现）
-  setTimeout(() => {
-    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-      if (tab?.url?.includes('options.html')) {
-        chrome.tabs.sendMessage(tab.id, { action: 'EDIT_RESUME', id });
-      }
-    });
-  }, 300);
+  await openOptionsIntent({ tab: 'resumes', resumeId: id });
 });
 
 resumeSelect.addEventListener('change', async () => {
@@ -150,7 +160,7 @@ resumeSelect.addEventListener('change', async () => {
 btnDetect.addEventListener('click', handleDetect);
 btnFill.addEventListener('click', handleFill);
 btnVision.addEventListener('click', handleVisionFill);
-btnHistory.addEventListener('click', () => chrome.runtime.openOptionsPage());
+btnHistory.addEventListener('click', () => openOptionsIntent({ tab: 'history' }));
 
 // ─── 检测表单字段 ─────────────────────────────────────────────────────────────
 
@@ -181,7 +191,10 @@ async function handleDetect() {
 // ─── AI 自动填充（后台驱动，不受 popup 关闭影响）─────────────────────────────
 
 async function handleFill() {
-  if (!apiKey) { chrome.runtime.openOptionsPage(); return; }
+  const provider = modelConfig.getProviderById(
+    settings.providerId || modelConfig.resolveProviderByBase(apiBase || '').id
+  );
+  if (!apiKey && provider.requiresKey) { chrome.runtime.openOptionsPage(); return; }
   if (!activeResume) {
     showStatus('请先选择简历', false);
     setTimeout(hideStatus, 2000);
@@ -201,6 +214,7 @@ async function handleFill() {
       resume: activeResume,
       apiKey,
       apiBase,
+      providerId: settings.providerId,
       model: settings.textModel
     }).then(resp => {
       if (resp?.error) {
@@ -256,17 +270,16 @@ function showMissingHint(hints) {
   const div = document.createElement('div');
   div.id = 'cvflash-missing-hint';
   div.style.cssText = `
-    background: #fff3cd; border: 1px solid #ffc107; border-radius: 6px;
-    padding: 8px 10px; margin: 8px 0; font-size: 12px; color: #856404;
+    background: rgba(250,241,223,0.94); border: 1px solid rgba(138,93,36,0.16); border-radius: 16px;
+    padding: 12px 14px; margin: 8px 0; font-size: 12px; color: #8a5d24; line-height: 1.5;
   `;
-  div.innerHTML = `<strong>⚠️ 建议先在网页手动添加更多条目：</strong><ul style="margin:4px 0 0 14px;padding:0">` +
+  div.innerHTML = `<strong>建议先在网页手动添加更多条目：</strong><ul style="margin:6px 0 0 14px;padding:0">` +
     hints.map(h => `<li>${h}</li>`).join('') +
-    `</ul><div style="margin-top:4px;font-size:11px;color:#6c757d">手动添加后请重新点击「AI自动填充」</div>`;
+    `</ul><div style="margin-top:6px;font-size:11px;color:#5f6a76">手动添加后请重新点击「AI 自动填充」。</div>`;
 
-  // 插入到状态栏下方
-  const statusEl = document.getElementById('status') || document.querySelector('.status');
-  if (statusEl) {
-    statusEl.insertAdjacentElement('afterend', div);
+  const anchorEl = document.getElementById('status-message') || document.querySelector('.page-status');
+  if (anchorEl) {
+    anchorEl.insertAdjacentElement('afterend', div);
   } else {
     document.body.appendChild(div);
   }
@@ -349,6 +362,10 @@ function sendToContent(tabId, message) {
   });
 }
 
+async function openOptionsIntent(intent = {}) {
+  await chrome.storage.local.set({ cvflash_options_intent: intent });
+  await chrome.runtime.openOptionsPage();
+}
 
 function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
