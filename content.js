@@ -49,24 +49,34 @@ async function handleDetect() {
 // ─── 填充 ─────────────────────────────────────────────────────────────────────
 
 async function handleAutofill(fieldMap) {
-  let filledCount = 0, skippedCount = 0;
+  let filledCount = 0, skippedCount = 0, clearedCount = 0;
   for (const [domIndex, value] of Object.entries(fieldMap)) {
-    if (value == null || value === '') { skippedCount++; continue; }
+    // null = 不操作此字段（完全不相关）
+    if (value == null) { skippedCount++; continue; }
     const field = detectedFields.find(f => f._domIndex === Number(domIndex));
     if (!field) { skippedCount++; continue; }
 
     try {
-      await fillField(field, value);
-      highlightElement(field.element, 'success');
-      filledCount++;
+      if (value === '') {
+        // 空字符串 = 清除旧值（简历无此数据）
+        await clearField(field);
+        clearedCount++;
+      } else {
+        await fillField(field, value);
+        highlightElement(field.element, 'success');
+        filledCount++;
+      }
     } catch (e) {
       console.warn('[CVflash] 填充失败:', field.label || field.name, e);
       skippedCount++;
     }
-    await sleep(30); // 字段间延迟，避免框架丢失事件
+    await sleep(30);
   }
-  showToast(`✓ 已填充 ${filledCount} 个字段`, 'success');
-  return { filledCount, skippedCount };
+  const msg = clearedCount > 0
+    ? `✓ 已填充 ${filledCount} 个字段，清除 ${clearedCount} 个旧值`
+    : `✓ 已填充 ${filledCount} 个字段`;
+  showToast(msg, 'success');
+  return { filledCount, skippedCount, clearedCount };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -403,6 +413,26 @@ function guessSemanticType(label, name, placeholder) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // 填充逻辑（框架兼容版）
 // ═══════════════════════════════════════════════════════════════════════════════
+
+async function clearField(field) {
+  const el = field.element;
+  const tag = el.tagName.toUpperCase();
+  if (tag === 'SELECT') return; // select 不清除
+  if (field.type === 'contenteditable' || el.contentEditable === 'true') {
+    el.innerHTML = '';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return;
+  }
+  const proto = tag === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+  if (nativeSetter) nativeSetter.call(el, '');
+  else el.value = '';
+  const tracker = el._valueTracker;
+  if (tracker) tracker.setValue('__clear__');
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}
 
 async function fillField(field, value) {
   const el = field.element;

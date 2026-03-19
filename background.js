@@ -240,6 +240,9 @@ async function handlePreAnalysis({ tabId, resume, apiKey, apiBase, providerId, m
     research: r.research?.length || 0,
     summary: r.summary ? 1 : 0
   };
+  console.log('[预分析] resume keys:', Object.keys(resume));
+  console.log('[预分析] r keys:', Object.keys(r));
+  console.log('[预分析] r.personal:', r.personal);
   console.log('[预分析] 简历数据量:', resumeCounts);
 
   // 4. AI 分析
@@ -551,10 +554,13 @@ function buildStructuredFieldPrompt(fields) {
     }
 
     let groupIdx = 0;
+    if (groupMap.size > 1) {
+      lines.push(`  ⚠ 此分区有 ${groupMap.size} 组条目，每组必须对应简历的一条独立记录（第1组=最近，第2组=次近）`);
+    }
     for (const [gid, groupFields] of groupMap) {
       if (groupMap.size > 1) {
         groupIdx++;
-        lines.push(`  └─ 第${groupIdx}组:`);
+        lines.push(`  └─ 第${groupIdx}组（对应简历第${groupIdx}条记录）:`);
       }
       for (const f of groupFields) {
         const pos = f.bbox ? `(位置: x=${f.bbox.x}, y=${f.bbox.y})` : '';
@@ -594,7 +600,7 @@ function buildExistingMatchesPrompt(fieldMap, fields) {
 function buildTextFillPrompt(structuredFields, resumeSummary, fields, sectionContext = '') {
   const contextSection = sectionContext ? `\n【当前处理分区】${sectionContext}` : '';
 
-  return `你是招聘表单智能填充助手，请基于语义理解准确匹配简历内容到表单字段。${contextSection}
+  return `你是招聘表单智能填充专家。请根据简历数据精准填充每一个表单字段。${contextSection}
 
 【字段列表】
 ${structuredFields}
@@ -602,37 +608,56 @@ ${structuredFields}
 【简历完整信息】
 ${resumeSummary}
 
-【AI 决策准则（重要）】
-1. 🎯 完全自主理解字段语义 - 通过标签、占位符、位置、分组关系综合判断
-2. 🔗 同组字段关联性 - 同一组字段（同学校/公司/项目）必须来自简历的同一条记录
-3. ⏰ 多组条目分配 - 多组重复字段按时间从近到远匹配（最近的排第1组）
-4. 🔄 强制覆盖模式 - 无论字段是否有"当前值"，都用简历数据覆盖（用户要求更新）
-5. ✅ 选项严格匹配 - 有选项的字段必须完全匹配选项文本之一（可进行语义同义转换）
-6. 🚫 数据质量校验 - 邮箱含@、电话纯数字、学校不含@、公司不含@
-7. 📅 日期格式 - 日期返回 YYYY-MM 格式（如 2024-09），不要只返回年份
+【核心规则 - 严格遵守】
 
-【语义映射策略】
-通过以下线索判断字段用途：
-- 文字线索：label文字（"学校名称"、"项目描述"）、placeholder（"请输入..."）、name属性
-- 位置线索：在同一 section 内的相对位置、与哪些字段相邻
-- 选项线索：select 选项列表通常能明确字段类型（学历、城市等）
-- 类型线索：type="email"/tel/date/month 明确字段格式
-- 分组线索：同组字段通常是同一实体的不同属性
+规则1: 字段语义精准匹配（最重要！）
+- "学校名称" → 只能填学校全称（如"拜罗伊特大学"），绝不能填日期、GPA
+- "专业名称" → 只能填专业名（如"金融与成本控制"），绝不能填日期、学位
+- "学历" → 只能填学位等级（硕士/本科/博士/大专），绝不能填 GPA 或专业
+- "公司名称" → 只能填公司全称，绝不能填人名或职位
+- "职位名称" → 只能填职位（如"数据营销实习生"），绝不能填公司名
+- "部门名称" → 只能填部门（如"市场部"），简历无此信息则返回 ""
+- "工作类型" → 只能从选项中选（全职/兼职/实习等），绝不能填工作描述或项目名
+- "工作描述" → 填该条经历的具体描述内容，每条经历描述必须不同
+- "在职时间/在校时间" → 只能填日期（YYYY-MM 或 YYYY/MM），绝不能填其他内容
+- "GPA/成绩" → 只能填数字成绩（如"3.8"），绝不能填到学历字段
 
-【特殊字段处理】
-- 项目名称：绝对不能返回 null！必须填写实际项目名（MoodPulse、CVmax插件、AI聊天助手等）
-- 创业经历：联合创始人/创始人/店长等关键词 → 创业类分区
-- 校园经历：社团/组织/学生会 → 校园经历分区
+规则2: 同组字段 = 同一条简历记录
+- 第1组（学校名称+专业+学历+时间）→ 必须全部来自简历的同一条教育经历
+- 第2组（学校名称+专业+学历+时间）→ 必须全部来自简历的另一条教育经历
+- 同理：每组工作经历的（公司+职位+部门+时间+描述）必须来自同一条
+- 绝对禁止跨记录混搭（不能把A公司的职位填到B公司那组）
 
-【输出要求】
-- 尽可能为每个字段匹配简历数据，真正无法判断时才返回 null
-- 只返回纯 JSON 对象，不要解释、不要 markdown 格式
+规则3: 按时间从近到远排列
+- 第1组 = 最近的经历，第2组 = 次近的经历，以此类推
 
-JSON格式示例：{"0":"丁宏磊","1":"3043755156@qq.com","5":"上海外国语大学","10":"MoodPulse","11":"项目负责人","15":null}`;
+规则4: 强制覆盖 + 清除无数据字段
+- 有简历数据：无论字段是否已有值，都用简历数据覆盖
+- 无简历数据：返回空字符串 ""（清除旧的残留数据）
+- 只有完全不相关的字段才返回 null（表示不动）
+
+规则5: 选项字段严格匹配
+- 有选项列表的字段，返回值必须是选项之一
+- 可做语义同义转换：简历写"本科" → 选项里找"本科/Bachelor/学士"
+- 工作类型：实习经历→选"实习"，正式工作→选"全职"
+
+规则6: 数据格式
+- 日期：返回 YYYY-MM 格式（如 2024-09）
+- 邮箱：必须含 @
+- 电话：纯数字
+- 描述：保留完整内容，每条经历的描述必须是该条经历自己的描述
+
+【输出】
+返回纯 JSON 对象，key 是字段 #编号，value 是填充值。
+- 有数据 → "填充值"
+- 简历无此数据 → ""（空字符串，清除旧值）
+- 完全不相关的字段 → null（不动）
+
+示例：{"0":"丁宏磊","1":"example@email.com","5":"上海外国语大学","6":"","10":null}`;
 }
 
 function buildFocusedFillPrompt(unresolvedFields, resumeSummary, allFields, existingFieldMap = {}) {
-  return `你正在进行第二轮精准校准，专注处理仍未确定的字段。
+  return `第二轮精准校准。参考已确定字段，处理剩余字段。
 
 【已确定字段】
 ${buildExistingMatchesPrompt(existingFieldMap, allFields)}
@@ -643,14 +668,15 @@ ${buildStructuredFieldPrompt(unresolvedFields)}
 【简历数据】
 ${resumeSummary}
 
-【校准策略】
-- 深入利用字段分组、section、选项、同组关系等语义线索
-- 对比已确定字段的匹配模式，寻找相似的语义关联
+【校准规则】
+- 字段语义精准：学校名→只填学校名，职位→只填职位，学历→只填学位等级
+- 工作类型→全职/兼职/实习，不是工作描述
+- 同组字段对应同一条简历记录
+- 简历无此数据→""（清除旧值），完全不相关→null
 - 不要改写已确定字段
-- 真正无法判断时返回 null
+- 每条经历的描述必须独立，不能复制其他经历的描述
 
-【输出】
-只返回待匹配字段的 JSON 对象，不要解释。`;
+只返回待匹配字段的纯 JSON 对象。`;
 }
 
 /**
@@ -667,7 +693,7 @@ function buildSimplifiedPrompt(fields, resumeSummary) {
     o: f.options?.slice(0, 5)
   }));
 
-  return `表单快速填充：通过语义理解匹配字段到简历数据。
+  return `招聘表单填充。精准匹配简历数据到表单字段。
 
 【字段列表】
 ${JSON.stringify(simpleFields)}
@@ -675,13 +701,13 @@ ${JSON.stringify(simpleFields)}
 【简历摘要】
 ${resumeSummary.slice(0, 2000)}
 
-【匹配规则】
-- 完全自主判断字段语义
-- 强制覆盖模式：无论字段是否有当前值，都用简历数据覆盖
-- 邮箱含@、电话纯数字、学校不含邮箱格式
-- 同组字段必须来自同一条记录
+【严格规则】
+- 字段语义精准：学校名→只填学校名，职位→只填职位，学历→只填学位等级，工作类型→只从选项选
+- 同组字段必须来自简历的同一条记录，禁止跨记录混搭
+- 多组按时间从近到远排列
 - 日期返回 YYYY-MM 格式
-- 真正无法判断时返回 null
+- 有数据→填值，简历无此数据→""（空字符串清除旧值），完全不相关→null
+- 每条经历的描述必须是该经历自己的描述，不能重复
 
 返回纯JSON对象：{"字段索引":"值"}`;
 }
