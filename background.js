@@ -128,14 +128,13 @@ async function handleFullFill({ tabId, resume, apiKey, apiBase, model }) {
       const { fieldHints, fallbackFieldMap } = localRuleMatch(sectionFields, resume);
       const hintCount = Object.keys(fieldHints).length;
 
-      // AI 匹配该分区的字段
+      // AI 匹配该分区的字段（完全自主决策，不受本地规则干扰）
       const aiResult = await handleAIMatch({
         fields: sectionFields,
         resume,
         apiKey,
         apiBase,
         model,
-        fieldHints,
         sectionContext: sectionName
       });
 
@@ -543,7 +542,7 @@ function matchFieldByRules(field, resume, groupIndex = 0) {
 
 // ─── AI 字段匹配（纯文本模式）────────────────────────────────────────────────
 
-async function handleAIMatch({ fields, resume, apiKey, apiBase, model, fieldHints = {}, sectionContext = '' }) {
+async function handleAIMatch({ fields, resume, apiKey, apiBase, model, sectionContext = '' }) {
   if (!apiKey) throw new Error('未配置 API Key，请先前往设置页面填写');
 
   const base = apiBase || API_BASES.cn;
@@ -557,17 +556,17 @@ async function handleAIMatch({ fields, resume, apiKey, apiBase, model, fieldHint
 
   const structuredPrompt = buildStructuredFieldPrompt(fields);
 
-  // 纯文本模式：仅发送结构化字段数据
+  // 纯文本模式：仅发送结构化字段数据（AI 完全自主决策，不受本地规则干扰）
   const messages = [{
     role: 'user',
-    content: buildTextFillPrompt(structuredPrompt, resumeSummary, fields, fieldHints, sectionContext)
+    content: buildTextFillPrompt(structuredPrompt, resumeSummary, fields, sectionContext)
   }];
 
   console.log('准备调用 API...');
   const defaultModel = base?.includes('deepseek.com') ? 'deepseek-chat' : 'glm-4.7-flash';
   const resolvedModel = resolveFieldMatchModel(base, model || defaultModel);
   const requestOpts = {
-    temperature: 0.05,
+    temperature: 0.25,
     max_tokens: 4096,
     timeout: 90000,
     response_format: buildJsonResponseFormat(base)
@@ -583,8 +582,8 @@ async function handleAIMatch({ fields, resume, apiKey, apiBase, model, fieldHint
       console.warn('⚠️ API 超时，降级到简化 prompt...');
       updateFillStatus('matching', '响应较慢，正在重试简化模式...', 50);
 
-      // 降级：使用简化 prompt
-      const simplifiedPrompt = buildSimplifiedPrompt(fields, resumeSummary, fieldHints);
+      // 降级：使用简化 prompt（完全依赖 AI，不传递本地规则）
+      const simplifiedPrompt = buildSimplifiedPrompt(fields, resumeSummary);
       const simplifiedMessages = [{
         role: 'user',
         content: simplifiedPrompt
@@ -613,7 +612,7 @@ async function handleAIMatch({ fields, resume, apiKey, apiBase, model, fieldHint
       updateFillStatus('matching', `AI 正在二次校准剩余 ${unresolvedFields.length} 个字段...`, 62);
       const refineResponse = await callChatAPI(base, apiKey, resolvedModel, [{
         role: 'user',
-        content: buildFocusedFillPrompt(unresolvedFields, resumeSummary, fields, fieldHints, fieldMap)
+        content: buildFocusedFillPrompt(unresolvedFields, resumeSummary, fields, fieldMap)
       }], {
         ...requestOpts,
         max_tokens: 3072,
@@ -707,51 +706,47 @@ function buildExistingMatchesPrompt(fieldMap, fields) {
 /**
  * 构建纯文本模式的 AI 提示词（无截图）
  */
-function buildTextFillPrompt(structuredFields, resumeSummary, fields, fieldHints = {}, sectionContext = '') {
+function buildTextFillPrompt(structuredFields, resumeSummary, fields, sectionContext = '') {
   const contextSection = sectionContext ? `\n【当前处理分区】${sectionContext}` : '';
 
-  return `你是招聘表单自动填充专家，需要尽可能准确地为每个字段匹配简历内容。${contextSection}
+  return `你是招聘表单智能填充助手，请基于语义理解准确匹配简历内容到表单字段。${contextSection}
 
-【字段信息】
+【字段列表】
 ${structuredFields}
 
-【简历数据】
+【简历完整信息】
 ${resumeSummary}
 
-【规则候选（仅供参考，AI 可推翻）】
-${buildFieldHintsPrompt(fields, fieldHints)}
+【AI 决策准则（重要）】
+1. 🎯 完全自主理解字段语义 - 不要依赖任何预设规则，通过标签、占位符、位置、分组关系综合判断
+2. 🔗 同组字段关联性 - 同一组字段（同学校/公司/项目）必须来自简历的同一条记录
+3. ⏰ 多组条目分配 - 多组重复字段按时间从近到远匹配（最近的排第1组）
+4. 🔒 已有内容跳过 - 有 当前值="..." 的字段返回 null，不覆盖
+5. ✅ 选项严格匹配 - 有选项的字段必须完全匹配选项文本之一（可进行语义同义转换）
+6. 🚫 数据质量校验 - 邮箱含@、电话纯数字、学校不含@、公司不含@
 
-【执行规则】
-1. 优先自行理解字段语义，参考规则候选，不能机械照抄
-2. 同一组字段必须来自同一条记录（同一学校/公司/项目）
-3. 多组重复字段按时间从近到远分配（最近的经历排第1组）
-4. 有 当前值="..." 标注的字段说明已有内容，返回 null 跳过，不要覆盖
-5. 若字段提供选项，返回值必须完全匹配选项文本之一
-6. 邮箱必须含@；电话纯数字；学校不能是邮箱或城市名；公司不能是邮箱
+【语义映射策略】
+通过以下线索判断字段用途：
+- 文字线索：label文字（"学校名称"、"项目描述"）、placeholder（"请输入..."）、name属性
+- 位置线索：在同一 section 内的相对位置、与哪些字段相邻
+- 选项线索：select 选项列表通常能明确字段类型（学历、城市等）
+- 类型线索：type="email"/tel/date/month 明确字段格式
+- 分组线索：同组字段通常是同一实体的不同属性
 
-【分区字段映射规则】
-- 教育经历 → 使用简历中 education 数据（学校、学位、专业、时间）
-- 工作/实习经历 → 使用简历中 experience 数据（公司、职位、时间、描述）
-- 项目经历 → 使用简历中 projects 数据（项目名、角色、描述、链接）
-  ⚠️ 项目名称字段必须填写实际项目名称，绝对不能返回 null！
-  ⚠️ 项目名称示例：MoodPulse、CVflash简历投递插件、高频交易预测模型
-- 科研经历 → 使用简历中 research 数据（机构、课题、时间、描述）
-- 校园/社团经历 → 使用简历中 activities 数据（组织、职务、时间、描述）
-- 创业类经历 → 使用简历中 experience（isInternship=false的创业/自营经历）或 activities 数据
-  创业经历判断依据：联合创始人、创始人、自营、创业、店长等职位关键词
-- 获奖经历 → 使用简历中 awards 数据
-- 作品/技能 → 使用简历中 skills、certifications、hobbies、customSections 数据
+【特殊字段处理】
+- 项目名称：绝对不能返回 null！必须填写实际项目名（MoodPulse、CVmax插件、AI聊天助手等）
+- 创业经历：联合创始人/创始人/店长等关键词 → 创业类分区
+- 校园经历：社团/组织/学生会 → 校园经历分区
 
 【输出要求】
-- 覆盖所有字段，已有内容的字段返回 null，真正无法判断时也返回 null
-- 只返回一个 JSON 对象，不要解释，不要 markdown
-- 格式：{"domIndex":"填充值"}
+- 覆盖所有字段，已有内容或真正无法判断的字段返回 null
+- 只返回纯 JSON 对象，不要解释、不要 markdown 格式
 
-示例：{"0":"丁宏磊","1":"3043755156@qq.com","5":"上海外国语大学","10":"MoodPulse","11":"项目负责人","15":null}`;
+JSON格式示例：{"0":"丁宏磊","1":"3043755156@qq.com","5":"上海外国语大学","10":"MoodPulse","11":"项目负责人","15":null}`;
 }
 
-function buildFocusedFillPrompt(unresolvedFields, resumeSummary, allFields, fieldHints = {}, existingFieldMap = {}) {
-  return `你正在做第二轮表单匹配，只处理仍未确定的字段。
+function buildFocusedFillPrompt(unresolvedFields, resumeSummary, allFields, existingFieldMap = {}) {
+  return `你正在进行第二轮精准校准，专注处理仍未确定的字段。
 
 【已确定字段】
 ${buildExistingMatchesPrompt(existingFieldMap, allFields)}
@@ -762,13 +757,11 @@ ${buildStructuredFieldPrompt(unresolvedFields)}
 【简历数据】
 ${resumeSummary}
 
-【规则候选（仅供参考）】
-${buildFieldHintsPrompt(unresolvedFields, fieldHints)}
-
-【要求】
-- 重点利用分组、section、选项和同组字段关系补齐剩余字段
+【校准策略】
+- 深入利用字段分组、section、选项、同组关系等语义线索
+- 对比已确定字段的匹配模式，寻找相似的语义关联
 - 不要改写已确定字段
-- 无法判断时返回 null
+- 真正无法判断时返回 null
 
 【输出】
 只返回待匹配字段的 JSON 对象，不要解释。`;
@@ -777,7 +770,7 @@ ${buildFieldHintsPrompt(unresolvedFields, fieldHints)}
 /**
  * 构建简化 prompt（降级模式，减少 token 消耗）
  */
-function buildSimplifiedPrompt(fields, resumeSummary, fieldHints = {}) {
+function buildSimplifiedPrompt(fields, resumeSummary) {
   // 只保留关键字段信息，减少 token 消耗
   const simpleFields = fields.map(f => ({
     i: f._domIndex,
@@ -788,19 +781,20 @@ function buildSimplifiedPrompt(fields, resumeSummary, fieldHints = {}) {
     o: f.options?.slice(0, 5)
   }));
 
-  return `表单填充：为字段匹配简历数据。
+  return `表单快速填充：通过语义理解匹配字段到简历数据。
 
-字段：${JSON.stringify(simpleFields)}
-简历：${resumeSummary.slice(0, 2000)}
-候选：${buildFieldHintsPrompt(fields, fieldHints)}
+【字段列表】
+${JSON.stringify(simpleFields)}
 
-规则：
-- AI 需独立判断字段语义，候选仅参考
-- 邮箱必须含@
-- 电话纯数字
-- 学校含大学/学院
-- 同组字段取同一条记录
-- 未命中返回 null
+【简历摘要】
+${resumeSummary.slice(0, 2000)}
+
+【匹配规则】
+- 完全自主判断字段语义，不受预设限制
+- 邮箱含@、电话纯数字、学校不含邮箱格式
+- 同组字段必须来自同一条记录
+- 有当前值的字段返回 null 跳过
+- 真正无法判断时返回 null
 
 返回纯JSON对象：{"字段索引":"值"}`;
 }
