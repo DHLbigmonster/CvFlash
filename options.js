@@ -289,6 +289,23 @@ function renderEntries(type, items) {
   container.innerHTML = items.map((item, i) => renderEntryCard(type, item, i)).join('');
 }
 
+// 日期标准化：将 yyyy 或 yyyy.MM 转换为 yyyy-MM 格式（用于 month 输入框）
+function normalizeMonthDate(dateStr) {
+  if (!dateStr) return '';
+  // 已经是 yyyy-MM 格式，直接返回
+  if (/^\d{4}-\d{2}$/.test(dateStr)) return dateStr;
+  // 纯年份 yyyy，默认补 -01
+  if (/^\d{4}$/.test(dateStr)) return `${dateStr}-01`;
+  // yyyy.MM 格式
+  const match = dateStr.match(/^(\d{4})\.(\d{1,2})$/);
+  if (match) {
+    const month = match[2].padStart(2, '0');
+    return `${match[1]}-${month}`;
+  }
+  // 其他情况返回原值
+  return dateStr;
+}
+
 function renderEntryCard(type, item, index) {
   if (type === 'experience') {
     return `
@@ -303,9 +320,9 @@ function renderEntryCard(type, item, index) {
         <div class="form-group"><label class="label">职位</label>
           <input class="input" name="position" value="${escapeHtml(item.position || '')}" placeholder="职位名称"></div>
         <div class="form-group"><label class="label">开始时间</label>
-          <input class="input" name="startDate" type="month" value="${item.startDate || ''}"></div>
+          <input class="input" name="startDate" type="month" value="${normalizeMonthDate(item.startDate)}"></div>
         <div class="form-group"><label class="label">结束时间</label>
-          <input class="input" name="endDate" type="month" value="${item.endDate || ''}" ${item.current ? 'disabled' : ''}></div>
+          <input class="input" name="endDate" type="month" value="${normalizeMonthDate(item.endDate)}" ${item.current ? 'disabled' : ''}></div>
         <div class="form-group">
           <label class="checkbox-row"><input type="checkbox" name="current" ${item.current ? 'checked' : ''}> 至今在职</label>
           <label class="checkbox-row" style="margin-left:12px"><input type="checkbox" name="isInternship" ${item.isInternship ? 'checked' : ''}> 实习</label>
@@ -333,9 +350,9 @@ function renderEntryCard(type, item, index) {
         <div class="form-group"><label class="label">专业</label>
           <input class="input" name="major" value="${escapeHtml(item.major || '')}" placeholder="计算机科学"></div>
         <div class="form-group"><label class="label">入学时间</label>
-          <input class="input" name="startDate" type="month" value="${item.startDate || ''}"></div>
+          <input class="input" name="startDate" type="month" value="${normalizeMonthDate(item.startDate)}"></div>
         <div class="form-group"><label class="label">毕业时间</label>
-          <input class="input" name="endDate" type="month" value="${item.endDate || ''}"></div>
+          <input class="input" name="endDate" type="month" value="${normalizeMonthDate(item.endDate)}"></div>
         <div class="form-group"><label class="label">GPA（选填）</label>
           <input class="input" name="gpa" value="${escapeHtml(item.gpa || '')}" placeholder="3.8/4.0"></div>
         <div class="form-group entry-full"><label class="label">补充信息（选填）</label>
@@ -357,9 +374,9 @@ function renderEntryCard(type, item, index) {
         <div class="form-group"><label class="label">担任角色</label>
           <input class="input" name="role" value="${escapeHtml(item.role || '')}" placeholder="前端负责人"></div>
         <div class="form-group"><label class="label">开始时间</label>
-          <input class="input" name="startDate" type="month" value="${item.startDate || ''}"></div>
+          <input class="input" name="startDate" type="month" value="${normalizeMonthDate(item.startDate)}"></div>
         <div class="form-group"><label class="label">结束时间</label>
-          <input class="input" name="endDate" type="month" value="${item.endDate || ''}"></div>
+          <input class="input" name="endDate" type="month" value="${normalizeMonthDate(item.endDate)}"></div>
         <div class="form-group entry-full"><label class="label">项目描述</label>
           <textarea class="input textarea" name="description" rows="4" placeholder="项目背景、技术栈、核心贡献...">${escapeHtml(item.description || '')}</textarea></div>
         <div class="form-group entry-full"><label class="label">项目链接（选填）</label>
@@ -383,9 +400,9 @@ function renderEntryCard(type, item, index) {
         <div class="form-group"><label class="label">导师</label>
           <input class="input" name="advisor" value="${escapeHtml(item.advisor || '')}" placeholder="Prof. XXX"></div>
         <div class="form-group"><label class="label">开始时间</label>
-          <input class="input" name="startDate" type="month" value="${item.startDate || ''}"></div>
+          <input class="input" name="startDate" type="month" value="${normalizeMonthDate(item.startDate)}"></div>
         <div class="form-group"><label class="label">结束时间</label>
-          <input class="input" name="endDate" type="month" value="${item.endDate || ''}"></div>
+          <input class="input" name="endDate" type="month" value="${normalizeMonthDate(item.endDate)}"></div>
         <div class="form-group entry-full"><label class="label">研究内容</label>
           <textarea class="input textarea" name="description" rows="4" placeholder="研究方向、方法、成果...">${escapeHtml(item.description || '')}</textarea></div>
       </div>
@@ -405,9 +422,9 @@ function renderEntryCard(type, item, index) {
       <div class="form-group"><label class="label">职务/角色</label>
         <input class="input" name="role" value="${escapeHtml(item.role || '')}" placeholder="社长、部长"></div>
       <div class="form-group"><label class="label">开始时间</label>
-        <input class="input" name="startDate" type="month" value="${item.startDate || ''}"></div>
+        <input class="input" name="startDate" type="month" value="${normalizeMonthDate(item.startDate)}"></div>
       <div class="form-group"><label class="label">结束时间</label>
-        <input class="input" name="endDate" type="month" value="${item.endDate || ''}"></div>
+        <input class="input" name="endDate" type="month" value="${normalizeMonthDate(item.endDate)}"></div>
       <div class="form-group entry-full"><label class="label">活动内容</label>
         <textarea class="input textarea" name="description" rows="4" placeholder="活动内容、职责、成果...">${escapeHtml(item.description || '')}</textarea></div>
     </div>
