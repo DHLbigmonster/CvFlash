@@ -23,6 +23,7 @@ const noApiWarning = document.getElementById('no-api-warning');
 let detectedFields = [];
 let activeResume = null;
 let apiKey = '';
+let apiBase = '';
 let settings = {};
 
 // ─── 分类 Tab + 简历下拉渲染 ─────────────────────────────────────────────────
@@ -75,10 +76,11 @@ function renderCategoryTabs(resumes, activeId) {
 async function init() {
   // 从 storage 加载数据
   const data = await chrome.storage.local.get([
-    'cvflash_resumes', 'cvflash_active_resume', 'cvflash_api_key', 'cvflash_settings'
+    'cvflash_resumes', 'cvflash_active_resume', 'cvflash_api_key', 'cvflash_api_base', 'cvflash_settings'
   ]);
 
   apiKey = data.cvflash_api_key || '';
+  apiBase = data.cvflash_api_base || '';
   settings = data.cvflash_settings || { textModel: 'glm-4.7-flash', visionModel: 'glm-4.6v-flash' };
 
   // 填充简历下拉列表（含分类 tab）
@@ -139,9 +141,7 @@ btnEditResume.addEventListener('click', () => {
 });
 
 resumeSelect.addEventListener('change', async () => {
-  const data = await chrome.storage.local.get('cvflash_resumes');
-  const resumes = data.cvflash_resumes || [];
-  activeResume = resumes.find(r => r.id === resumeSelect.value);
+  activeResume = allResumesList.find(r => r.id === resumeSelect.value);
   if (activeResume) {
     await chrome.storage.local.set({ cvflash_active_resume: activeResume.id });
   }
@@ -200,7 +200,7 @@ async function handleFill() {
       tabId: tab.id,
       resume: activeResume,
       apiKey,
-      apiBase: (await chrome.storage.local.get('cvflash_api_base')).cvflash_api_base,
+      apiBase,
       model: settings.textModel
     }).then(resp => {
       if (resp?.error) {
@@ -349,14 +349,6 @@ function sendToContent(tabId, message) {
   });
 }
 
-async function saveHistory(entry) {
-  const data = await chrome.storage.local.get('cvflash_history');
-  const history = data.cvflash_history || [];
-  history.unshift(entry);
-  // 最多保留 50 条
-  if (history.length > 50) history.length = 50;
-  await chrome.storage.local.set({ cvflash_history: history });
-}
 
 function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');

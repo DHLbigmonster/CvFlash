@@ -176,9 +176,11 @@ async function handleFullFill({ tabId, resume, apiKey, apiBase, model }) {
       return fillResp;
     }
 
-    // 5. 记录历史
-    const tab = await chrome.tabs.get(tabId);
-    const histData = await chrome.storage.local.get('cvflash_history');
+    // 5. 记录历史（并行读取 tab 信息和历史记录）
+    const [tab, histData] = await Promise.all([
+      chrome.tabs.get(tabId),
+      chrome.storage.local.get('cvflash_history')
+    ]);
     const history = histData.cvflash_history || [];
     history.unshift({
       url: tab.url,
