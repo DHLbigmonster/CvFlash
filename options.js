@@ -646,21 +646,36 @@ async function handlePDFUpload(file) {
       return;
     }
 
-    setProgress(60, 'AI 正在解析简历结构...');
+    setProgress(60, 'AI 正在解析简历结构（约15-30秒）...');
 
-    const resp = await chrome.runtime.sendMessage({
-      action: 'PARSE_PDF_RESUME',
-      extractedText,
-      imageDataUrl: null,
-      apiKey,
-      apiBase: storageData.cvmax_api_base,
-      textModel: settings.textModel,
-      visionModel: settings.visionModel
-    });
+    // 进度动画：让用户知道AI正在工作
+    let dotCount = 0;
+    const progressInterval = setInterval(() => {
+      dotCount = (dotCount + 1) % 4;
+      const dots = '.'.repeat(dotCount);
+      setProgress(60 + dotCount * 3, `AI 正在解析简历结构${dots}`);
+    }, 2000);
 
-    if (resp.error) {
-      // 显示详细错误信息
-      throw new Error(`解析失败: ${resp.error}\n\n提取到的文本片段: ${extractedText.slice(0, 100)}...`);
+    let resp;
+    try {
+      resp = await chrome.runtime.sendMessage({
+        action: 'PARSE_PDF_RESUME',
+        extractedText,
+        imageDataUrl: null,
+        apiKey,
+        apiBase: storageData.cvmax_api_base,
+        textModel: settings.textModel,
+        visionModel: settings.visionModel
+      });
+    } finally {
+      clearInterval(progressInterval);
+    }
+
+    if (resp?.error) {
+      throw new Error(resp.error);
+    }
+    if (!resp) {
+      throw new Error('未收到响应，请检查网络或刷新后重试');
     }
 
     setProgress(85, '正在创建简历...');
@@ -714,7 +729,18 @@ async function handlePDFUpload(file) {
 
   } catch (err) {
     progressEl.classList.add('hidden');
-    alert('PDF 解析失败：' + err.message);
+    console.error('PDF解析异常:', err);
+
+    // 根据错误类型给出具体建议
+    let msg = 'PDF 解析失败：' + err.message;
+    if (err.message.includes('API Key') || err.message.includes('无效') || err.message.includes('401')) {
+      msg += '\n\n👉 请前往「API 设置」检查 API Key 是否正确填写。';
+    } else if (err.message.includes('超时') || err.message.includes('timeout')) {
+      msg += '\n\n👉 网络较慢，请稍后重试。或检查 API 服务是否正常。';
+    } else if (err.message.includes('未收到响应')) {
+      msg += '\n\n👉 请刷新页面后重试。';
+    }
+    alert(msg);
   }
 }
 

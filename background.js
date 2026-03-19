@@ -1180,7 +1180,7 @@ ${resumeText.slice(0, 8000)}
 
       const response = await callChatAPI(base, apiKey, model, [
         { role: 'user', content: parsePrompt }
-      ], { temperature: 0.05, max_tokens: 8192 });
+      ], { temperature: 0.05, max_tokens: 4096, timeout: 45000, maxRetries: 1 });
 
       let aiParsed;
       const jsonMatch = response.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || response.match(/(\{[\s\S]*\})/);
@@ -1197,8 +1197,20 @@ ${resumeText.slice(0, 8000)}
       };
 
     } catch (aiErr) {
-      console.warn('AI 解析失败，回退到本地解析:', aiErr.message);
-      // AI 失败时回退到本地解析
+      console.warn('AI 解析失败:', aiErr.message);
+
+      // API Key 错误或网络问题 → 直接抛出，不要假装成功
+      if (aiErr.message.includes('API Key') || aiErr.message.includes('401') || aiErr.message.includes('无效')) {
+        throw new Error('API Key 无效，请在设置页面重新配置。错误：' + aiErr.message);
+      }
+
+      // 超时 → 给出明确提示
+      if (aiErr.message.includes('超时') || aiErr.message.includes('timeout')) {
+        throw new Error('AI解析超时（45秒）。可能原因：网络较慢或API服务繁忙。请稍后重试。');
+      }
+
+      // 其他错误 → 回退到本地解析，但明确告知用户
+      console.warn('回退到本地正则解析（结果可能不完整）');
       const localResult = localParseResume(resumeText);
       return {
         resume: validateAndCleanResume(localResult),
@@ -1566,8 +1578,8 @@ async function testAPIConnection(apiKey, apiBase) {
 // ─── HTTP 工具 ────────────────────────────────────────────────────────────────
 
 async function callChatAPI(base, apiKey, model, messages, opts = {}) {
-  const maxRetries = 3;
-  const timeoutMs = opts.timeout || 60000; // 默认60秒超时，大表单需要更长时间
+  const maxRetries = opts.maxRetries ?? 3;
+  const timeoutMs = opts.timeout || 60000;
   let lastError;
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
