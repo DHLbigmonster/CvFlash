@@ -24,6 +24,10 @@ function updateFillStatus(state, message, progress) {
   chrome.runtime.sendMessage({ action: 'FILL_STATUS_UPDATE', ...fillStatus }).catch(() => {});
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 function shouldReinjectContentScript(error) {
   const message = error?.message || '';
   return message.includes('Receiving end does not exist') ||
@@ -67,6 +71,15 @@ function normalizeAuthToken(apiKey, provider) {
   return provider.requiresKey ? '' : 'local-token';
 }
 
+function normalizeBridgeConfig(settings = {}) {
+  return {
+    enabled: !!settings.bridgeEnabled,
+    url: String(settings.bridgeUrl || '').trim(),
+    token: String(settings.bridgeToken || '').trim(),
+    timeoutMs: Math.max(5000, (Number(settings.bridgeTimeoutSec) || 45) * 1000)
+  };
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   switch (msg.action) {
     case 'AI_MATCH_FIELDS':
@@ -95,6 +108,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       testAPIConnection(msg.apiKey, msg.apiBase, msg.providerId).then(sendResponse).catch(e => sendResponse({ success: false, message: e.message }));
       return true;
 
+    case 'TEST_BRIDGE':
+      testBridgeConnection(msg.bridgeUrl, msg.bridgeToken, msg.bridgeTimeoutSec).then(sendResponse).catch(e => sendResponse({ success: false, message: e.message }));
+      return true;
+
     case 'PARSE_PDF_RESUME':
       handleParsePDF(msg).then(sendResponse).catch(e => sendResponse({ error: e.message }));
       return true;
@@ -108,8 +125,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // ─── 完整填充流程（在 background 中运行，不受 popup 关闭影响）────────────────
 
-async function handleFullFill({ tabId, resume, apiKey, apiBase, providerId, model }) {
+async function handleFullFill({ tabId, resume, apiKey, apiBase, providerId, model, visionModel }) {
   try {
+    const storageData = await chrome.storage.local.get('cvflash_settings');
+    const bridgeConfig = normalizeBridgeConfig(storageData.cvflash_settings || {});
+
     // 1. 检测字段
     updateFillStatus('detecting', '正在检测表单字段...', 10);
     const detectResp = await sendToTab(tabId, { action: 'DETECT_FIELDS' });
@@ -138,6 +158,7 @@ async function handleFullFill({ tabId, resume, apiKey, apiBase, providerId, mode
     const totalSections = Object.keys(sectionGroups).length;
     let currentSection = 0;
     const allFieldMap = {};
+    const allCommands = [];
     let totalAiMatched = 0;
 
     for (const [sectionName, sectionFields] of Object.entries(sectionGroups)) {
@@ -149,7 +170,7 @@ async function handleFullFill({ tabId, resume, apiKey, apiBase, providerId, mode
 
       // AI 完全自主决策
       const aiResult = await handleAIMatch({
-        fields: sectionFields, resume, apiKey, apiBase, providerId, model,
+        tabId, fields: sectionFields, resume, apiKey, apiBase, providerId, model, visionModel, bridgeConfig,
         sectionContext: sectionName
       });
 
@@ -159,6 +180,7 @@ async function handleFullFill({ tabId, resume, apiKey, apiBase, providerId, mode
       }
 
       Object.assign(allFieldMap, aiResult.fieldMap);
+      allCommands.push(...(aiResult.commands || []));
       totalAiMatched += Object.keys(aiResult.fieldMap || {}).length;
       console.log(`✓ ${sectionName}: AI匹配 ${Object.keys(aiResult.fieldMap || {}).length} 个`);
     }
@@ -173,11 +195,14 @@ async function handleFullFill({ tabId, resume, apiKey, apiBase, providerId, mode
     updateFillStatus('filling', `正在填充 ${matchedCount} 个字段...`, 75);
     console.log(`\n=== 开始填充 ${matchedCount} 个字段 ===`);
 
-    const fillResp = await sendToTab(tabId, { action: 'AUTOFILL', fieldMap: allFieldMap });
+    const fillResp = allCommands.length
+      ? await sendToTab(tabId, { action: 'APPLY_COMMANDS', commands: allCommands })
+      : await sendToTab(tabId, { action: 'AUTOFILL', fieldMap: allFieldMap });
     if (fillResp?.error) {
       updateFillStatus('error', '填充失败: ' + fillResp.error);
       return fillResp;
     }
+    const appliedCount = fillResp?.filledCount ?? fillResp?.appliedCount ?? 0;
 
     // 5. 记录历史（并行读取 tab 信息和历史记录）
     const [tab, histData] = await Promise.all([
@@ -189,16 +214,16 @@ async function handleFullFill({ tabId, resume, apiKey, apiBase, providerId, mode
       url: tab.url,
       title: tab.title,
       resumeName: resume.name || '未命名',
-      filledCount: fillResp.filledCount,
+      filledCount: appliedCount,
       timestamp: new Date().toISOString()
     });
     if (history.length > 50) history.length = 50;
     await chrome.storage.local.set({ cvflash_history: history });
 
-    updateFillStatus('done', `已填充 ${fillResp.filledCount} 个字段（AI 匹配 ${totalAiMatched}）`, 100);
-    console.log(`=== 填充完成: ${fillResp.filledCount}/${fields.length} 个字段 ===`);
+    updateFillStatus('done', `已填充 ${appliedCount} 个字段（AI 匹配 ${totalAiMatched}）`, 100);
+    console.log(`=== 填充完成: ${appliedCount}/${fields.length} 个字段 ===`);
 
-    return { fieldMap: allFieldMap, filledCount: fillResp.filledCount, totalFields: fields.length };
+    return { fieldMap: allFieldMap, filledCount: appliedCount, totalFields: fields.length };
 
   } catch (e) {
     updateFillStatus('error', '填充失败: ' + e.message);
@@ -435,16 +460,462 @@ function detectMissingEntries(fields, resume, sectionGroups) {
   return hints;
 }
 
-// （本地规则已移除 - AI 完全自主决策）
+// ─── 本地高置信映射 + AI/视觉补齐 ───────────────────────────────────────────
+
+function sortResumeEntries(entries) {
+  return [...(entries || [])].sort((a, b) => {
+    const latestDiff = getEntryLatestMonth(b) - getEntryLatestMonth(a);
+    if (latestDiff !== 0) return latestDiff;
+    return getEntryStartMonth(b) - getEntryStartMonth(a);
+  });
+}
+
+function getEntryLatestMonth(entry) {
+  if (!entry) return 0;
+  if (entry.current) return 999912;
+  return parseMonthKey(entry.endDate) || parseMonthKey(entry.startDate) || 0;
+}
+
+function getEntryStartMonth(entry) {
+  if (!entry) return 0;
+  return parseMonthKey(entry.startDate) || 0;
+}
+
+function parseMonthKey(raw) {
+  const str = String(raw || '').trim();
+  const match = str.match(/(\d{4})[-/.年]?(\d{1,2})?/);
+  if (!match) return 0;
+  return Number(match[1]) * 100 + Number(match[2] || '1');
+}
+
+function normalizeResumeForFill(resume) {
+  const source = resume?.resume || resume || {};
+  return {
+    ...source,
+    personal: source.personal || {},
+    summary: source.summary || '',
+    experience: sortResumeEntries(source.experience || []),
+    education: sortResumeEntries(source.education || []),
+    projects: sortResumeEntries(source.projects || []),
+    research: sortResumeEntries(source.research || []),
+    activities: sortResumeEntries(source.activities || []),
+    skills: Array.isArray(source.skills) ? source.skills : [],
+    languages: Array.isArray(source.languages) ? source.languages : [],
+    certifications: Array.isArray(source.certifications) ? source.certifications : [],
+    awards: Array.isArray(source.awards) ? source.awards : [],
+    hobbies: Array.isArray(source.hobbies) ? source.hobbies : [],
+    customSections: Array.isArray(source.customSections) ? source.customSections : []
+  };
+}
+
+function sortFieldsForMatching(fields) {
+  return [...fields].sort((a, b) => {
+    const yDiff = (a.bbox?.y ?? 0) - (b.bbox?.y ?? 0);
+    if (Math.abs(yDiff) > 6) return yDiff;
+    const xDiff = (a.bbox?.x ?? 0) - (b.bbox?.x ?? 0);
+    if (xDiff !== 0) return xDiff;
+    return a._domIndex - b._domIndex;
+  });
+}
+
+function inferSectionCategory(sectionContext, fields) {
+  const scores = {
+    personal: 0,
+    summary: 0,
+    education: 0,
+    experience: 0,
+    projects: 0,
+    research: 0,
+    activities: 0,
+    skills: 0,
+    languages: 0
+  };
+
+  const scoreText = (text, rules) => {
+    for (const [category, pattern, weight] of rules) {
+      if (pattern.test(text)) scores[category] += weight;
+    }
+  };
+
+  scoreText(String(sectionContext || '').toLowerCase(), [
+    ['personal', /基本|个人|信息|profile|personal|contact/, 5],
+    ['summary', /简介|概述|summary|objective|profile|自我评价|求职意向/, 5],
+    ['education', /教育|学历|学校|education/, 5],
+    ['experience', /工作|实习|职业|employment|experience|career/, 5],
+    ['projects', /项目|project|作品/, 5],
+    ['research', /科研|研究|research|lab/, 5],
+    ['activities', /社团|校园|活动|志愿|student|activity/, 5],
+    ['skills', /技能|skill|expertise/, 5],
+    ['languages', /语言|language/, 5]
+  ]);
+
+  for (const field of fields) {
+    const label = `${field.label || ''} ${field.name || ''} ${field.placeholder || ''}`.toLowerCase();
+    const hint = String(field.hint || '').toLowerCase();
+
+    if (['name', 'firstname', 'lastname', 'email', 'phone', 'location', 'linkedin', 'github', 'portfolio'].includes(hint)) scores.personal += 3;
+    if (['school', 'degree', 'major', 'gpa', 'graduation'].includes(hint)) scores.education += 3;
+    if (['company', 'position', 'department', 'jobstartdate', 'jobenddate', 'worktype', 'yearsexp'].includes(hint)) scores.experience += 3;
+    if (hint === 'skills') scores.skills += 3;
+    if (hint === 'languages') scores.languages += 3;
+
+    scoreText(label, [
+      ['personal', /姓名|邮箱|电话|手机|location|地址|linkedin|github/, 2],
+      ['summary', /自我评价|个人简介|求职意向|summary|cover/, 2],
+      ['education', /学校|大学|学历|学位|专业|gpa|毕业/, 2],
+      ['experience', /公司|部门|职位|岗位|工作类型|入职|离职|在职|职责|工作内容/, 2],
+      ['projects', /项目名称|项目角色|项目描述|project/, 2],
+      ['research', /实验室|导师|研究方向|research|advisor/, 2],
+      ['activities', /社团|组织|活动|学生会|志愿/, 2],
+      ['skills', /技能|skill|expertise/, 2],
+      ['languages', /语言|english|英语|日语|德语/, 2]
+    ]);
+  }
+
+  const winner = Object.entries(scores).sort((a, b) => b[1] - a[1])[0];
+  return winner && winner[1] > 0 ? winner[0] : 'other';
+}
+
+function splitPersonName(fullName) {
+  const name = String(fullName || '').trim();
+  if (!name) return { firstName: '', lastName: '' };
+  if (/[\u4e00-\u9fff]/.test(name) && name.length >= 2 && name.length <= 4) {
+    return { lastName: name.slice(0, 1), firstName: name.slice(1) };
+  }
+  const parts = name.split(/\s+/).filter(Boolean);
+  if (parts.length <= 1) return { firstName: name, lastName: '' };
+  return { firstName: parts.slice(0, -1).join(' '), lastName: parts.at(-1) || '' };
+}
+
+function matchesPattern(text, pattern) {
+  return pattern.test(String(text || '').toLowerCase());
+}
+
+function inferFieldBinding(field, sectionCategory) {
+  const text = `${field.label || ''} ${field.name || ''} ${field.placeholder || ''}`.toLowerCase();
+  const hint = String(field.hint || '').toLowerCase();
+
+  if (hint === 'name' || matchesPattern(text, /full.?name|姓名|姓名拼音/)) return { scope: 'personal', slot: 'name' };
+  if (hint === 'firstname' || matchesPattern(text, /first.?name|名(?!称)|given.?name/)) return { scope: 'personal', slot: 'firstName' };
+  if (hint === 'lastname' || matchesPattern(text, /last.?name|姓|family.?name|surname/)) return { scope: 'personal', slot: 'lastName' };
+  if (hint === 'email') return { scope: 'personal', slot: 'email' };
+  if (hint === 'phone') return { scope: 'personal', slot: 'phone' };
+  if (hint === 'location' || matchesPattern(text, /location|城市|地址|所在地|居住地/)) return { scope: 'personal', slot: 'location' };
+  if (hint === 'linkedin') return { scope: 'personal', slot: 'linkedin' };
+  if (hint === 'github') return { scope: 'personal', slot: 'github' };
+  if (hint === 'portfolio' || matchesPattern(text, /website|portfolio|个人网站|博客/)) return { scope: 'personal', slot: 'website' };
+
+  if (sectionCategory === 'summary' || matchesPattern(text, /summary|profile|自我评价|个人简介|求职意向/)) {
+    return { scope: 'summary', slot: 'summary' };
+  }
+  if (sectionCategory === 'skills' || hint === 'skills' || matchesPattern(text, /技能|skill|expertise/)) {
+    return { scope: 'skills', slot: 'list' };
+  }
+  if (sectionCategory === 'languages' || hint === 'languages' || matchesPattern(text, /语言|language|英语|日语|德语|法语/)) {
+    return { scope: 'languages', slot: 'list' };
+  }
+
+  if (sectionCategory === 'education') {
+    if (hint === 'school' || matchesPattern(text, /school|university|college|学校|大学|院校/)) return { scope: 'education', slot: 'school' };
+    if (hint === 'degree' || matchesPattern(text, /degree|学历|学位|education.?level/)) return { scope: 'education', slot: 'degree' };
+    if (hint === 'major' || matchesPattern(text, /major|专业|field.?of.?study|discipline/)) return { scope: 'education', slot: 'major' };
+    if (hint === 'gpa' || matchesPattern(text, /gpa|绩点|成绩/)) return { scope: 'education', slot: 'gpa' };
+    if (hint === 'currentflag' || matchesPattern(text, /至今|在读|current|present|ongoing/)) return { scope: 'education', slot: 'current' };
+    if (hint === 'startdate' || matchesPattern(text, /start|from|开始|入学/)) return { scope: 'education', slot: 'startDate' };
+    if (hint === 'graduation' || hint === 'jobenddate' || matchesPattern(text, /graduat|end|to|毕业|结束/)) return { scope: 'education', slot: 'endDate' };
+    if (hint === 'description' || matchesPattern(text, /课程|补充信息|描述|说明/)) return { scope: 'education', slot: 'description' };
+  }
+
+  if (sectionCategory === 'experience') {
+    if (hint === 'company' || matchesPattern(text, /company|employer|organization|公司|单位|雇主/)) return { scope: 'experience', slot: 'company' };
+    if (hint === 'department' || matchesPattern(text, /department|部门/)) return { scope: 'experience', slot: 'department' };
+    if (hint === 'position' || matchesPattern(text, /position|job.?title|岗位|职位|职务|role/)) return { scope: 'experience', slot: 'position' };
+    if (hint === 'worktype' || matchesPattern(text, /work.?type|employment.?type|job.?type|全职|兼职|实习/)) return { scope: 'experience', slot: 'workType' };
+    if (hint === 'currentflag' || matchesPattern(text, /至今|在职|current|present|ongoing/)) return { scope: 'experience', slot: 'current' };
+    if (hint === 'jobstartdate' || hint === 'startdate' || matchesPattern(text, /start|from|开始|入职|任职/)) return { scope: 'experience', slot: 'startDate' };
+    if (hint === 'jobenddate' || matchesPattern(text, /end|to|until|结束|离职|在职/)) return { scope: 'experience', slot: 'endDate' };
+    if (hint === 'description' || matchesPattern(text, /description|responsibilit|duties|工作内容|职责|经历描述|工作描述/)) return { scope: 'experience', slot: 'description' };
+  }
+
+  if (sectionCategory === 'projects') {
+    if (matchesPattern(text, /project.?name|项目名称|项目名|课题名称|名称/)) return { scope: 'projects', slot: 'name' };
+    if (hint === 'position' || matchesPattern(text, /role|职责|角色|担任/)) return { scope: 'projects', slot: 'role' };
+    if (hint === 'currentflag' || matchesPattern(text, /至今|当前|current|present|ongoing/)) return { scope: 'projects', slot: 'current' };
+    if (hint === 'startdate' || matchesPattern(text, /start|from|开始/)) return { scope: 'projects', slot: 'startDate' };
+    if (hint === 'jobenddate' || matchesPattern(text, /end|to|结束/)) return { scope: 'projects', slot: 'endDate' };
+    if (hint === 'description' || matchesPattern(text, /description|项目描述|介绍|内容/)) return { scope: 'projects', slot: 'description' };
+    if (hint === 'portfolio' || matchesPattern(text, /url|link|链接|网址|仓库/)) return { scope: 'projects', slot: 'url' };
+  }
+
+  if (sectionCategory === 'research') {
+    if (matchesPattern(text, /institution|lab|实验室|研究机构|大学|院系/)) return { scope: 'research', slot: 'institution' };
+    if (hint === 'position' || matchesPattern(text, /role|角色|职务|身份/)) return { scope: 'research', slot: 'role' };
+    if (matchesPattern(text, /advisor|导师|pi/)) return { scope: 'research', slot: 'advisor' };
+    if (hint === 'currentflag' || matchesPattern(text, /至今|当前|current|present|ongoing/)) return { scope: 'research', slot: 'current' };
+    if (hint === 'startdate' || matchesPattern(text, /start|from|开始/)) return { scope: 'research', slot: 'startDate' };
+    if (hint === 'jobenddate' || matchesPattern(text, /end|to|结束/)) return { scope: 'research', slot: 'endDate' };
+    if (hint === 'description' || matchesPattern(text, /research|研究内容|描述|方向/)) return { scope: 'research', slot: 'description' };
+  }
+
+  if (sectionCategory === 'activities') {
+    if (matchesPattern(text, /organization|社团|组织|学生会|协会|活动单位/)) return { scope: 'activities', slot: 'organization' };
+    if (hint === 'position' || matchesPattern(text, /role|角色|职务|岗位/)) return { scope: 'activities', slot: 'role' };
+    if (hint === 'currentflag' || matchesPattern(text, /至今|当前|current|present|ongoing/)) return { scope: 'activities', slot: 'current' };
+    if (hint === 'startdate' || matchesPattern(text, /start|from|开始/)) return { scope: 'activities', slot: 'startDate' };
+    if (hint === 'jobenddate' || matchesPattern(text, /end|to|结束/)) return { scope: 'activities', slot: 'endDate' };
+    if (hint === 'description' || matchesPattern(text, /活动内容|描述|经历|工作内容/)) return { scope: 'activities', slot: 'description' };
+  }
+
+  return null;
+}
+
+function buildLocalFieldMap(fields, resume, sectionContext = '') {
+  const sectionCategory = inferSectionCategory(sectionContext, fields);
+  const result = {};
+
+  for (const group of buildSectionEntryGroups(fields, sectionCategory)) {
+    for (const field of group.fields) {
+      const binding = inferFieldBinding(field, sectionCategory);
+      if (!binding) continue;
+
+      const entryIndex = isRepeatableSectionCategory(binding.scope) ? group.index : 0;
+      const rawValue = getBindingValue(binding, resume, field, entryIndex);
+      const normalizedValue = normalizeValueForField(rawValue, field, binding);
+      if (normalizedValue == null) continue;
+
+      result[field._domIndex] = normalizedValue;
+    }
+  }
+
+  return result;
+}
+
+function getBindingValue(binding, resume, field, entryIndex) {
+  if (binding.scope === 'personal') {
+    const personal = resume.personal || {};
+    if (binding.slot === 'firstName') return splitPersonName(personal.name).firstName;
+    if (binding.slot === 'lastName') return splitPersonName(personal.name).lastName;
+    return personal[binding.slot] ?? '';
+  }
+
+  if (binding.scope === 'summary') {
+    return resume.summary || '';
+  }
+
+  if (binding.scope === 'skills') {
+    return joinListForField(resume.skills || [], field);
+  }
+
+  if (binding.scope === 'languages') {
+    return joinListForField(resume.languages || [], field);
+  }
+
+  const entries = Array.isArray(resume[binding.scope]) ? resume[binding.scope] : [];
+  const entry = entries[entryIndex];
+  if (!entry) return '';
+
+  if (binding.scope === 'experience' && binding.slot === 'company') {
+    return entry.company || entry.employer || entry.organization || '';
+  }
+  if (binding.scope === 'experience' && binding.slot === 'department') {
+    return entry.department || entry.team || entry.businessUnit || '';
+  }
+  if (binding.scope === 'experience' && binding.slot === 'position') {
+    return entry.position || entry.role || entry.title || entry.jobTitle || '';
+  }
+  if (binding.scope === 'experience' && binding.slot === 'workType') {
+    return entry.workType || inferEmploymentType(entry, field);
+  }
+  if (binding.slot === 'current') {
+    return !!entry.current;
+  }
+  if (binding.scope === 'experience' && binding.slot === 'endDate') {
+    return entry.current ? '' : (entry.endDate || '');
+  }
+
+  if (binding.scope === 'education' && binding.slot === 'endDate') {
+    return entry.endDate || '';
+  }
+
+  if (binding.scope === 'projects' && binding.slot === 'role') {
+    return entry.role || entry.position || entry.title || '';
+  }
+
+  return entry[binding.slot] ?? '';
+}
+
+function joinListForField(items, field) {
+  const values = (items || []).map(item => String(item || '').trim()).filter(Boolean);
+  if (!values.length) return '';
+  return field.type === 'textarea' || field.type === 'contenteditable'
+    ? values.join('\n')
+    : values.join(', ');
+}
+
+function inferEmploymentType(entry, field) {
+  const desired = entry?.isInternship || /实习|intern/i.test(`${entry?.position || ''} ${entry?.company || ''}`)
+    ? '实习'
+    : '全职';
+  return field.options?.length ? pickBestOption(field.options, desired) : desired;
+}
+
+function normalizeValueForField(value, field, binding = null) {
+  if (value == null) return null;
+  if (field.type === 'checkbox') {
+    if (typeof value === 'boolean') return value;
+    const str = String(value).trim().toLowerCase();
+    if (!str) return false;
+    return ['true', '1', 'yes', 'checked', '至今', '当前', 'current', 'present'].includes(str);
+  }
+  if (typeof value === 'string' && !value.trim()) return '';
+
+  let normalized = String(value).trim();
+  const hint = String(field.hint || '').toLowerCase();
+  const label = `${field.label || ''} ${field.name || ''}`.toLowerCase();
+
+  if (binding?.slot?.toLowerCase().includes('date') || field.type === 'date' || field.type === 'month' || /日期|时间|from|to|start|end|毕业|入学|在职/.test(label)) {
+    normalized = normalizeMonthValue(normalized);
+  }
+
+  if (hint === 'phone' || /电话|手机|tel|phone/.test(label)) {
+    normalized = normalized.replace(/[^\d+]/g, '');
+  }
+
+  if (hint === 'email') {
+    normalized = normalized.toLowerCase();
+  }
+
+  if (field.options?.length) {
+    normalized = pickBestOption(field.options, normalized);
+  }
+
+  return normalized;
+}
+
+function normalizeMonthValue(value) {
+  const str = String(value || '').trim();
+  if (!str) return '';
+  if (/^\d{4}-\d{2}$/.test(str) || /^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+  const match = str.match(/(\d{4})[./年-](\d{1,2})/);
+  if (match) return `${match[1]}-${String(match[2]).padStart(2, '0')}`;
+  if (/^\d{4}$/.test(str)) return `${str}-01`;
+  return str;
+}
+
+function pickBestOption(options, desiredValue) {
+  const desired = String(desiredValue || '').trim();
+  if (!desired) return '';
+
+  const normalize = (text) => String(text || '').replace(/[\s\-_.,()（）【】/]/g, '').toLowerCase();
+  const desiredNorm = normalize(desired);
+  const candidates = options.map(option => String(option || '').trim()).filter(Boolean);
+
+  const exact = candidates.find(option => option === desired);
+  if (exact) return exact;
+
+  const lowered = desired.toLowerCase();
+  const contains = candidates.find(option => option.toLowerCase() === lowered || option.toLowerCase().includes(lowered) || lowered.includes(option.toLowerCase()));
+  if (contains) return contains;
+
+  const normalizedMatch = candidates.find(option => normalize(option) === desiredNorm || normalize(option).includes(desiredNorm) || desiredNorm.includes(normalize(option)));
+  if (normalizedMatch) return normalizedMatch;
+
+  const synonymMap = [
+    [['实习', 'internship', 'intern'], /实习|intern/],
+    [['全职', 'fulltime', 'full-time'], /全职|full.?time|正式/],
+    [['兼职', 'parttime', 'part-time'], /兼职|part.?time/],
+    [['本科', 'bachelor', '学士'], /本科|学士|bachelor/],
+    [['硕士', 'master'], /硕士|master|msc|ma/],
+    [['博士', 'phd', 'doctor'], /博士|phd|doctor/]
+  ];
+
+  for (const [keywords, pattern] of synonymMap) {
+    if (!pattern.test(desired.toLowerCase())) continue;
+    const synonym = candidates.find(option => keywords.some(keyword => normalize(option).includes(normalize(keyword))));
+    if (synonym) return synonym;
+  }
+
+  return desired;
+}
+
+function isSelectLikeField(field) {
+  return field?.tagName === 'SELECT'
+    || field?.type === 'aria-combobox'
+    || !!field?.options?.length;
+}
+
+function buildCommandForField(field, value) {
+  if (value == null) return null;
+  if (value === '') {
+    return { action: 'clear', domIndex: field._domIndex };
+  }
+  if (field.type === 'checkbox') {
+    return { action: 'toggle', domIndex: field._domIndex, value: Boolean(value) };
+  }
+  if (isSelectLikeField(field)) {
+    return { action: 'select', domIndex: field._domIndex, value: String(value) };
+  }
+  return { action: 'set', domIndex: field._domIndex, value: String(value) };
+}
+
+function fieldMapToCommands(fieldMap, fields) {
+  return Object.entries(fieldMap || {})
+    .map(([domIndex, value]) => {
+      const field = fields.find(item => item._domIndex === Number(domIndex));
+      if (!field) return null;
+      return buildCommandForField(field, value);
+    })
+    .filter(Boolean);
+}
+
+function isRepeatableSectionCategory(sectionCategory) {
+  return ['education', 'experience', 'projects', 'research', 'activities'].includes(sectionCategory);
+}
+
+function buildSectionEntryGroups(fields, sectionCategory) {
+  const sortedFields = sortFieldsForMatching(fields);
+  if (!sortedFields.length) return [];
+
+  if (!isRepeatableSectionCategory(sectionCategory)) {
+    return [{ key: 'single', index: 0, fields: sortedFields }];
+  }
+
+  const explicitGroups = new Map();
+  for (const field of sortedFields) {
+    const key = field.group?.id || '';
+    if (!key) continue;
+    if (!explicitGroups.has(key)) explicitGroups.set(key, []);
+    explicitGroups.get(key).push(field);
+  }
+
+  const meaningfulGroups = [...explicitGroups.entries()]
+    .filter(([, groupFields]) => groupFields.length >= 2)
+    .sort((a, b) => getGroupTop(a[1]) - getGroupTop(b[1]));
+
+  if (meaningfulGroups.length >= 2) {
+    return meaningfulGroups.map(([key, groupFields], index) => ({
+      key,
+      index,
+      fields: sortFieldsForMatching(groupFields)
+    }));
+  }
+
+  return [{ key: 'single', index: 0, fields: sortedFields }];
+}
+
+function getGroupTop(fields) {
+  return Math.min(...fields.map(field => field.bbox?.y ?? 0));
+}
 
 // ─── AI 字段匹配（纯文本模式）────────────────────────────────────────────────
 
-async function handleAIMatch({ fields, resume, apiKey, apiBase, providerId, model, sectionContext = '' }) {
+async function handleAIMatch({ tabId, fields, resume, apiKey, apiBase, providerId, model, visionModel, bridgeConfig, sectionContext = '' }) {
   const base = apiBase || API_BASES.cn;
   const provider = resolveProvider(providerId, base);
-  const authToken = normalizeAuthToken(apiKey, provider);
-  if (!authToken) throw new Error('未配置 API Key，请先前往设置页面填写');
-  const resumeSummary = buildResumeSummary(resume);
+  const normalizedResume = normalizeResumeForFill(resume);
+  const resumeSummary = buildResumeSummary(normalizedResume);
+  let fieldMap = buildLocalFieldMap(fields, normalizedResume, sectionContext);
+  let commands = fieldMapToCommands(fieldMap, fields);
 
   console.log('=== 开始 AI 字段匹配 ===');
   console.log(`分区: ${sectionContext || '全表单'}`);
@@ -453,12 +924,50 @@ async function handleAIMatch({ fields, resume, apiKey, apiBase, providerId, mode
   console.log(`供应商: ${provider.label}`);
   console.log(`使用模型: ${model || 'default'}`);
 
-  const structuredPrompt = buildStructuredFieldPrompt(fields);
+  let unresolvedFields = fields.filter(field => fieldMap[field._domIndex] == null);
+  if (!unresolvedFields.length) {
+    return { fieldMap, commands };
+  }
+
+  if (bridgeConfig?.enabled && bridgeConfig.url) {
+    try {
+      updateFillStatus('matching', `正在通过 Bridge 处理 ${sectionContext || '当前分区'}...`, 46);
+      const bridgeResult = await callBridgeAPI({
+        tabId,
+        bridgeConfig,
+        fields: unresolvedFields,
+        allFields: fields,
+        resume: normalizedResume,
+        sectionContext,
+        existingFieldMap: fieldMap,
+        includeScreenshot: !!visionModel
+      });
+      const bridgeCommands = parseBridgeCommands(bridgeResult, unresolvedFields, normalizedResume);
+      if (bridgeCommands.length) {
+        const bridgeMap = commandsToFieldMap(bridgeCommands, unresolvedFields);
+        fieldMap = { ...fieldMap, ...bridgeMap };
+        commands.push(...bridgeCommands);
+        unresolvedFields = fields.filter(field => fieldMap[field._domIndex] == null);
+        if (!unresolvedFields.length) {
+          return { fieldMap, commands: dedupeCommands(commands) };
+        }
+      }
+    } catch (error) {
+      console.warn('Bridge 调用失败，回退内置模型链路:', error.message);
+    }
+  }
+
+  updateFillStatus('matching', `正在补齐 ${sectionContext || '当前分区'} 的剩余 ${unresolvedFields.length} 个字段...`, 48);
+  const structuredPrompt = buildStructuredFieldPrompt(unresolvedFields);
+  const authToken = normalizeAuthToken(apiKey, provider);
+  if (!authToken) {
+    throw new Error('Bridge 未返回有效命令，且未配置 API Key，无法继续使用内置模型链路');
+  }
 
   // 纯文本模式：仅发送结构化字段数据（AI 完全自主决策，不受本地规则干扰）
   const messages = [{
     role: 'user',
-    content: buildTextFillPrompt(structuredPrompt, resumeSummary, fields, sectionContext)
+    content: buildCommandFillPrompt(structuredPrompt, resumeSummary, fields, sectionContext, fieldMap)
   }];
 
   console.log('准备调用 API...');
@@ -482,7 +991,7 @@ async function handleAIMatch({ fields, resume, apiKey, apiBase, providerId, mode
       updateFillStatus('matching', '响应较慢，正在重试简化模式...', 50);
 
       // 降级：使用简化 prompt（完全依赖 AI，不传递本地规则）
-      const simplifiedPrompt = buildSimplifiedPrompt(fields, resumeSummary);
+      const simplifiedPrompt = buildSimplifiedCommandPrompt(unresolvedFields, resumeSummary, fieldMap, fields);
       const simplifiedMessages = [{
         role: 'user',
         content: simplifiedPrompt
@@ -498,34 +1007,65 @@ async function handleAIMatch({ fields, resume, apiKey, apiBase, providerId, mode
   }
 
   console.log('API 响应收到，长度:', response?.length);
-  let fieldMap = parseFillResponse(response, fields);
-  if (!Object.keys(fieldMap).length && typeof response === 'string' && response.trim()) {
+  let aiCommands = parseCommandResponse(response, unresolvedFields, normalizedResume);
+  let aiFieldMap = commandsToFieldMap(aiCommands, unresolvedFields);
+  if (!aiCommands.length && typeof response === 'string' && response.trim()) {
     updateFillStatus('matching', '正在修正 AI 返回格式...', 55);
     const repairedResponse = await repairFillResponse(base, authToken, provider, resolvedModel, response);
-    fieldMap = parseFillResponse(repairedResponse, fields);
+    aiCommands = parseCommandResponse(repairedResponse, unresolvedFields, normalizedResume);
+    aiFieldMap = commandsToFieldMap(aiCommands, unresolvedFields);
+  }
+  fieldMap = { ...fieldMap, ...aiFieldMap };
+  commands.push(...aiCommands);
+
+  unresolvedFields = fields.filter(field => fieldMap[field._domIndex] == null);
+
+  if (unresolvedFields.length > 0 && provider.supportsVision && visionModel) {
+    try {
+      updateFillStatus('matching', `正在用视觉模式校准剩余 ${unresolvedFields.length} 个字段...`, 58);
+      const visionMap = await handleVisionFieldMatch({
+        tabId,
+        fields: unresolvedFields,
+        allFields: fields,
+        existingFieldMap: fieldMap,
+        resumeSummary,
+        resume: normalizedResume,
+        apiKey: authToken,
+        apiBase: base,
+        provider,
+        visionModel,
+        sectionContext
+      });
+      fieldMap = { ...fieldMap, ...visionMap };
+      commands.push(...fieldMapToCommands(visionMap, unresolvedFields));
+      unresolvedFields = fields.filter(field => fieldMap[field._domIndex] == null);
+    } catch (error) {
+      console.warn('视觉校准失败，继续文本流程:', error.message);
+    }
   }
 
-  const unresolvedFields = fields.filter(field => fieldMap[field._domIndex] == null || fieldMap[field._domIndex] === '');
   if (unresolvedFields.length > 0 && unresolvedFields.length < fields.length) {
     try {
       updateFillStatus('matching', `AI 正在二次校准剩余 ${unresolvedFields.length} 个字段...`, 62);
       const refineResponse = await callChatAPI(base, authToken, provider, resolvedModel, [{
         role: 'user',
-        content: buildFocusedFillPrompt(unresolvedFields, resumeSummary, fields, fieldMap)
+        content: buildFocusedCommandPrompt(unresolvedFields, resumeSummary, fields, fieldMap)
       }], {
         ...requestOpts,
         max_tokens: 3072,
         timeout: 45000
       });
-      const refinedMap = parseFillResponse(refineResponse, unresolvedFields);
+      const refinedCommands = parseCommandResponse(refineResponse, unresolvedFields, normalizedResume);
+      const refinedMap = commandsToFieldMap(refinedCommands, unresolvedFields);
       fieldMap = { ...fieldMap, ...refinedMap };
+      commands.push(...refinedCommands);
     } catch (error) {
       console.warn('二次 AI 校准失败，保留首次结果:', error.message);
     }
   }
 
   console.log('=== 字段匹配完成 ===');
-  return { fieldMap };
+  return { fieldMap, commands: dedupeCommands(commands) };
 }
 
 /**
@@ -571,10 +1111,11 @@ function buildStructuredFieldPrompt(fields) {
         const nameHint = f.name ? ` name="${f.name}"` : '';
         const placeholderHint = f.placeholder ? ` placeholder="${f.placeholder}"` : '';
         const currentValueHint = f.currentValue ? ` 当前值="${String(f.currentValue).slice(0, 40)}"` : '';
+        const checkedHint = f.type === 'checkbox' ? ` checked=${Boolean(f.checked)}` : '';
         const requiredHint = f.required ? ' required' : '';
         const autoHint = f.autocomplete ? ` autocomplete="${f.autocomplete}"` : '';
         const inputModeHint = f.inputMode ? ` inputMode="${f.inputMode}"` : '';
-        lines.push(`${prefix}#${f._domIndex}: label="${f.label || f.name || f.placeholder || '?'}" [${f.type}]${semanticHint}${requiredHint}${nameHint}${placeholderHint}${autoHint}${inputModeHint}${currentValueHint}${opts}${siblings} ${pos}`.trim());
+        lines.push(`${prefix}#${f._domIndex}: label="${f.label || f.name || f.placeholder || '?'}" [${f.type}]${semanticHint}${requiredHint}${checkedHint}${nameHint}${placeholderHint}${autoHint}${inputModeHint}${currentValueHint}${opts}${siblings} ${pos}`.trim());
       }
     }
   }
@@ -597,12 +1138,15 @@ function buildExistingMatchesPrompt(fieldMap, fields) {
 /**
  * 构建纯文本模式的 AI 提示词（无截图）
  */
-function buildTextFillPrompt(structuredFields, resumeSummary, fields, sectionContext = '') {
+function buildCommandFillPrompt(structuredFields, resumeSummary, fields, sectionContext = '', existingFieldMap = {}) {
   const contextSection = sectionContext ? `\n【当前处理分区】${sectionContext}` : '';
+  const existingMatches = Object.keys(existingFieldMap || {}).length
+    ? `\n【已高置信确定字段】\n${buildExistingMatchesPrompt(existingFieldMap, fields)}\n- 上述字段已确定，不要改动，只补齐仍未确定的字段。`
+    : '';
 
-  return `你是招聘表单智能填充专家。请根据简历数据精准填充每一个表单字段。${contextSection}
+  return `你是招聘表单智能填充专家。请根据简历数据精准填充每一个表单字段。你的输出必须是“执行命令列表”。${contextSection}${existingMatches}
 
-【字段列表】
+【待补齐字段列表】
 ${structuredFields}
 
 【简历完整信息】
@@ -640,6 +1184,7 @@ ${resumeSummary}
 - 有选项列表的字段，返回值必须是选项之一
 - 可做语义同义转换：简历写"本科" → 选项里找"本科/Bachelor/学士"
 - 工作类型：实习经历→选"实习"，正式工作→选"全职"
+- 对于复选框字段（如"至今/当前在职/当前在读"），返回 true 或 false
 
 规则6: 数据格式
 - 日期：返回 YYYY-MM 格式（如 2024-09）
@@ -648,15 +1193,21 @@ ${resumeSummary}
 - 描述：保留完整内容，每条经历的描述必须是该条经历自己的描述
 
 【输出】
-返回纯 JSON 对象，key 是字段 #编号，value 是填充值。
-- 有数据 → "填充值"
-- 简历无此数据 → ""（空字符串，清除旧值）
-- 完全不相关的字段 → null（不动）
+返回纯 JSON 数组，每项一条命令：
+{"action":"set|select|clear|toggle","domIndex":数字,"value":"字符串或布尔值","reason":"可选"}
 
-示例：{"0":"丁宏磊","1":"example@email.com","5":"上海外国语大学","6":"","10":null}`;
+规则：
+- 普通输入框/文本域/日期输入框 → action="set"
+- 下拉/可搜索下拉/combobox → action="select"
+- 需要清空旧值 → action="clear"
+- 复选框（至今/当前） → action="toggle"，value 为 true/false
+- 完全不相关的字段不要输出命令
+
+示例：
+[{"action":"set","domIndex":0,"value":"丁宏磊"},{"action":"select","domIndex":5,"value":"实习"},{"action":"clear","domIndex":6},{"action":"toggle","domIndex":12,"value":true}]`;
 }
 
-function buildFocusedFillPrompt(unresolvedFields, resumeSummary, allFields, existingFieldMap = {}) {
+function buildFocusedCommandPrompt(unresolvedFields, resumeSummary, allFields, existingFieldMap = {}) {
   return `第二轮精准校准。参考已确定字段，处理剩余字段。
 
 【已确定字段】
@@ -671,18 +1222,19 @@ ${resumeSummary}
 【校准规则】
 - 字段语义精准：学校名→只填学校名，职位→只填职位，学历→只填学位等级
 - 工作类型→全职/兼职/实习，不是工作描述
+- 复选框（至今/当前）使用 toggle 命令，value 为 true/false
 - 同组字段对应同一条简历记录
 - 简历无此数据→""（清除旧值），完全不相关→null
 - 不要改写已确定字段
 - 每条经历的描述必须独立，不能复制其他经历的描述
 
-只返回待匹配字段的纯 JSON 对象。`;
+只返回待匹配字段的命令 JSON 数组。`;
 }
 
 /**
  * 构建简化 prompt（降级模式，减少 token 消耗）
  */
-function buildSimplifiedPrompt(fields, resumeSummary) {
+function buildSimplifiedCommandPrompt(fields, resumeSummary, existingFieldMap = {}, allFields = fields) {
   // 只保留关键字段信息，减少 token 消耗
   const simpleFields = fields.map(f => ({
     i: f._domIndex,
@@ -693,7 +1245,10 @@ function buildSimplifiedPrompt(fields, resumeSummary) {
     o: f.options?.slice(0, 5)
   }));
 
-  return `招聘表单填充。精准匹配简历数据到表单字段。
+  return `招聘表单填充。精准匹配简历数据到表单字段，并输出命令列表。
+
+【已确定字段】
+${buildExistingMatchesPrompt(existingFieldMap, allFields)}
 
 【字段列表】
 ${JSON.stringify(simpleFields)}
@@ -703,13 +1258,77 @@ ${resumeSummary.slice(0, 2000)}
 
 【严格规则】
 - 字段语义精准：学校名→只填学校名，职位→只填职位，学历→只填学位等级，工作类型→只从选项选
+- 复选框（至今/当前在职）输出 toggle 命令
 - 同组字段必须来自简历的同一条记录，禁止跨记录混搭
 - 多组按时间从近到远排列
 - 日期返回 YYYY-MM 格式
-- 有数据→填值，简历无此数据→""（空字符串清除旧值），完全不相关→null
+- 有数据→输出命令，简历无此数据→clear，完全不相关→不输出
 - 每条经历的描述必须是该经历自己的描述，不能重复
 
-返回纯JSON对象：{"字段索引":"值"}`;
+返回纯JSON数组：[{"action":"set|select|clear|toggle","domIndex":1,"value":"..."}]`;
+}
+
+function buildVisionFillPrompt(unresolvedFields, resumeSummary, allFields, existingFieldMap = {}, sectionContext = '') {
+  const contextSection = sectionContext ? `\n【当前处理分区】${sectionContext}` : '';
+  return `你正在根据网页截图校准招聘表单字段。截图是真实招聘网页，字段列表包含对应 DOM 索引和页面坐标。${contextSection}
+
+【已确定字段】
+${buildExistingMatchesPrompt(existingFieldMap, allFields)}
+
+【待校准字段】
+${buildStructuredFieldPrompt(unresolvedFields)}
+
+【简历完整信息】
+${resumeSummary}
+
+【视觉校准规则】
+- 结合截图中的可见标签、占位符、相邻字段和坐标判断字段真实语义
+- 如果字段已有历史残留值，但简历没有对应信息，请返回 "" 清空
+- 如果是复选框（如至今/当前在职），请返回 true 或 false
+- 部门、岗位、学校、专业、公司、邮箱、电话不能互相串位
+- 同组字段必须来自同一条简历记录
+- 只能返回待校准字段的纯 JSON 对象
+- 看不清或无法确定时返回 null
+
+示例：{"12":"市场部","13":"数据营销实习生","14":""}`;
+}
+
+async function handleVisionFieldMatch({ tabId, fields, allFields, existingFieldMap, resumeSummary, resume, apiKey, apiBase, provider, visionModel, sectionContext }) {
+  if (!tabId || !fields.length) return {};
+  const screenshotDataUrl = await captureTabForFields(tabId, fields);
+  if (!screenshotDataUrl) return {};
+
+  const prompt = buildVisionFillPrompt(fields, resumeSummary, allFields, existingFieldMap, sectionContext);
+  const response = await callChatAPI(apiBase, apiKey, provider, visionModel, [{
+    role: 'user',
+    content: [
+      { type: 'text', text: prompt },
+      { type: 'image_url', image_url: { url: screenshotDataUrl } }
+    ]
+  }], {
+    temperature: 0.1,
+    max_tokens: 3072,
+    timeout: 60000,
+    response_format: buildJsonResponseFormat(provider, apiBase)
+  });
+
+  return parseFillResponse(response, fields, resume);
+}
+
+async function captureTabForFields(tabId, fields) {
+  try {
+    const firstField = sortFieldsForMatching(fields)[0];
+    if (firstField) {
+      await sendToTab(tabId, { action: 'FOCUS_FIELD', domIndex: firstField._domIndex }).catch(() => null);
+      await sleep(350);
+    }
+
+    const tab = await chrome.tabs.get(tabId);
+    return chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+  } catch (error) {
+    console.warn('截图失败:', error.message);
+    return null;
+  }
 }
 
 /**
@@ -732,11 +1351,12 @@ function buildJsonResponseFormat(provider, base) {
 
 async function repairFillResponse(base, apiKey, provider, model, rawResponse) {
   const prompt = [
-    '请将下面内容整理成一个纯 JSON 对象。',
+    '请将下面内容整理成纯 JSON。',
     '要求：',
     '- 只返回 JSON',
-    '- key 必须是字段 domIndex（字符串或数字均可）',
-    '- value 是填充值，无法确定时填 null',
+    '- 如果原内容是命令列表，整理成 JSON 数组',
+    '- 如果原内容是字段映射，整理成 JSON 对象',
+    '- 不要补充解释',
     '',
     '原始内容：',
     rawResponse.slice(0, 6000)
@@ -756,6 +1376,9 @@ function extractJsonCandidate(response) {
   const fencedMatch = response.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
   if (fencedMatch?.[1]) return fencedMatch[1].trim();
 
+  const arrayMatch = response.match(/\[[\s\S]*\]/);
+  if (arrayMatch?.[0]) return arrayMatch[0].trim();
+
   const objectMatch = response.match(/\{[\s\S]*\}/);
   if (objectMatch?.[0]) return objectMatch[0].trim();
 
@@ -774,10 +1397,159 @@ function normalizeParsedEntries(parsed) {
   return Object.entries(parsed || {});
 }
 
+function normalizeParsedCommands(parsed) {
+  if (Array.isArray(parsed)) return parsed;
+  if (Array.isArray(parsed?.commands)) return parsed.commands;
+  if (Array.isArray(parsed?.actions)) return parsed.actions;
+  return [];
+}
+
+function parseCommandResponse(response, fields, resume = null) {
+  try {
+    const jsonCandidate = extractJsonCandidate(response);
+    if (!jsonCandidate) return [];
+
+    const normalizedJson = jsonCandidate.replace(/,\s*([}\]])/g, '$1');
+    const parsed = JSON.parse(normalizedJson);
+    const commands = [];
+
+    for (const rawCommand of normalizeParsedCommands(parsed)) {
+      const action = String(rawCommand?.action || '').toLowerCase();
+      const domIndex = Number(rawCommand?.domIndex ?? rawCommand?.field_index ?? rawCommand?.index);
+      if (!['set', 'select', 'clear', 'toggle'].includes(action)) continue;
+      if (Number.isNaN(domIndex)) continue;
+
+      const field = fields.find(item => item._domIndex === domIndex);
+      if (!field) continue;
+
+      if (action === 'clear') {
+        commands.push({ action, domIndex });
+        continue;
+      }
+
+      const normalizedValue = normalizeValueForField(rawCommand?.value, field);
+      if (normalizedValue == null) continue;
+      const validation = validateFieldValue(normalizedValue, field, resume);
+      if (!validation.valid) continue;
+
+      commands.push({
+        action,
+        domIndex,
+        value: field.type === 'checkbox' ? Boolean(normalizedValue) : normalizedValue
+      });
+    }
+
+    return dedupeCommands(commands);
+  } catch (error) {
+    console.warn('命令响应解析失败:', error.message);
+    return [];
+  }
+}
+
+function commandsToFieldMap(commands, fields) {
+  const result = {};
+  for (const command of commands || []) {
+    const field = fields.find(item => item._domIndex === Number(command.domIndex));
+    if (!field) continue;
+    if (command.action === 'clear') {
+      result[field._domIndex] = '';
+    } else if (command.action === 'toggle') {
+      result[field._domIndex] = Boolean(command.value);
+    } else {
+      result[field._domIndex] = command.value;
+    }
+  }
+  return result;
+}
+
+function dedupeCommands(commands) {
+  const map = new Map();
+  for (const command of commands || []) {
+    map.set(Number(command.domIndex), command);
+  }
+  return [...map.values()].sort((a, b) => Number(a.domIndex) - Number(b.domIndex));
+}
+
+async function callBridgeAPI({ tabId, bridgeConfig, fields, allFields, resume, sectionContext, existingFieldMap, includeScreenshot }) {
+  const screenshot = includeScreenshot ? await captureTabForFields(tabId, fields) : null;
+  const payload = {
+    mode: 'fill_commands',
+    page: {
+      url: await getTabUrl(tabId),
+      title: await getTabTitle(tabId),
+      sectionContext: sectionContext || '',
+      fields,
+      allFields,
+      existingFieldMap
+    },
+    resume,
+    screenshot,
+    timestamp: new Date().toISOString()
+  };
+
+  const headers = {
+    'Content-Type': 'application/json'
+  };
+  if (bridgeConfig.token) {
+    headers.Authorization = bridgeConfig.token.startsWith('Bearer ')
+      ? bridgeConfig.token
+      : `Bearer ${bridgeConfig.token}`;
+  }
+
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error(`Bridge 请求超时（${bridgeConfig.timeoutMs / 1000}秒）`)), bridgeConfig.timeoutMs);
+  });
+
+  const fetchPromise = fetch(bridgeConfig.url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload)
+  });
+
+  const response = await Promise.race([fetchPromise, timeoutPromise]);
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    throw new Error(`Bridge 错误 ${response.status}: ${errorText || response.statusText}`);
+  }
+  return response.json();
+}
+
+function parseBridgeCommands(result, fields, resume) {
+  if (!result) return [];
+  if (Array.isArray(result.commands) || Array.isArray(result.actions)) {
+    return parseCommandResponse(JSON.stringify(result.commands || result.actions), fields, resume);
+  }
+  if (result.fieldMap && typeof result.fieldMap === 'object') {
+    return fieldMapToCommands(result.fieldMap, fields);
+  }
+  if (typeof result === 'string') {
+    return parseCommandResponse(result, fields, resume);
+  }
+  return [];
+}
+
+async function getTabUrl(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return tab.url || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+async function getTabTitle(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return tab.title || '';
+  } catch (_) {
+    return '';
+  }
+}
+
 /**
  * 解析 AI 填充响应
  */
-function parseFillResponse(response, fields) {
+function parseFillResponse(response, fields, resume = null) {
   console.log('=== AI填充响应解析 ===');
   console.log('原始响应:', response);
 
@@ -798,7 +1570,7 @@ function parseFillResponse(response, fields) {
     let rejectedCount = 0;
 
     for (const [key, value] of normalizeParsedEntries(parsed)) {
-      if (value == null || value === '' || value === 'null') continue;
+      if (value == null || value === 'null') continue;
       const domIndex = Number(key);
       if (isNaN(domIndex)) continue;
 
@@ -808,18 +1580,27 @@ function parseFillResponse(response, fields) {
         continue;
       }
 
+      const normalizedValue = normalizeValueForField(value, field);
+      if (normalizedValue === '') {
+        result[domIndex] = '';
+        matchedCount++;
+        console.log(`✓ 清空字段 ${domIndex}`);
+        continue;
+      }
+      if (normalizedValue == null) continue;
+
       // 验证字段值的合理性
-      const validation = validateFieldValue(value, field);
+      const validation = validateFieldValue(normalizedValue, field, resume);
       if (!validation.valid) {
         console.warn(`⚠️ 字段 ${domIndex} ("${field.label}") 值验证失败: ${validation.reason}`);
-        console.warn(`   填入值: "${value}"`);
+        console.warn(`   填入值: "${normalizedValue}"`);
         rejectedCount++;
         continue;
       }
 
-      result[domIndex] = String(value);
+      result[domIndex] = field.type === 'checkbox' ? Boolean(normalizedValue) : String(normalizedValue);
       matchedCount++;
-      console.log(`✓ 匹配字段 ${domIndex}: "${value}"`);
+      console.log(`✓ 匹配字段 ${domIndex}: "${normalizedValue}"`);
     }
 
     console.log(`总共匹配了 ${matchedCount} 个字段，拒绝 ${rejectedCount} 个不合理值`);
@@ -833,8 +1614,17 @@ function parseFillResponse(response, fields) {
 /**
  * 验证字段值的合理性
  */
-function validateFieldValue(value, field) {
+function validateFieldValue(value, field, resume = null) {
+  if (field.type === 'checkbox') {
+    if (typeof value === 'boolean') return { valid: true };
+    if (['true', 'false', '1', '0'].includes(String(value).trim().toLowerCase())) return { valid: true };
+    return { valid: false, reason: '复选框字段必须是 true/false' };
+  }
+
   const strValue = String(value).trim();
+  const personalName = String(resume?.personal?.name || '').trim();
+  const personalParts = splitPersonName(personalName);
+  const personalTokens = [personalName, personalParts.firstName, personalParts.lastName].filter(Boolean);
 
   // 空值检查
   if (!strValue) {
@@ -909,6 +1699,53 @@ function validateFieldValue(value, field) {
     const cities = ['北京', '上海', '广州', '深圳', '杭州', '成都', '南京', '武汉', '西安', '苏州'];
     if (cities.includes(strValue)) {
       return { valid: false, reason: '专业字段不能是城市名' };
+    }
+  }
+
+  // 部门字段验证
+  if (label.includes('department') || label.includes('部门') || hint === 'department') {
+    if (/@/.test(strValue)) {
+      return { valid: false, reason: '部门字段不能包含邮箱' };
+    }
+    if (/^\d{4}[-/.年]\d{1,2}/.test(strValue) || /至今|present/i.test(strValue)) {
+      return { valid: false, reason: '部门字段不能是日期' };
+    }
+    if (personalTokens.includes(strValue)) {
+      return { valid: false, reason: '部门字段不能是姓名' };
+    }
+  }
+
+  // 职位字段验证
+  if (label.includes('position') || label.includes('job title') || label.includes('职位') || label.includes('岗位') || hint === 'position') {
+    if (/@/.test(strValue)) {
+      return { valid: false, reason: '职位字段不能包含邮箱' };
+    }
+    if (/^\d{4}[-/.年]\d{1,2}/.test(strValue) || /至今|present/i.test(strValue)) {
+      return { valid: false, reason: '职位字段不能是日期' };
+    }
+    if (personalTokens.includes(strValue)) {
+      return { valid: false, reason: '职位字段不能是姓名' };
+    }
+  }
+
+  // 工作类型字段验证
+  if (label.includes('work type') || label.includes('employment type') || label.includes('工作类型') || hint === 'worktype') {
+    if (/^\d{4}[-/.年]\d{1,2}/.test(strValue)) {
+      return { valid: false, reason: '工作类型不能是日期' };
+    }
+    if (strValue.length > 20) {
+      return { valid: false, reason: '工作类型不应是长段描述' };
+    }
+  }
+
+  // 日期字段验证
+  if (field.type === 'date' || field.type === 'month' || /日期|时间|start|end|from|to|毕业|入学|在职/.test(label)) {
+    if (/@/.test(strValue)) {
+      return { valid: false, reason: '日期字段不能包含邮箱' };
+    }
+    const normalizedDate = normalizeMonthValue(strValue);
+    if (!/^\d{4}-\d{2}(?:-\d{2})?$/.test(normalizedDate) && !/至今|present|now/i.test(strValue)) {
+      return { valid: false, reason: '日期格式不正确' };
     }
   }
 
@@ -1479,6 +2316,51 @@ async function testAPIConnection(apiKey, apiBase, providerId) {
   }
 }
 
+async function testBridgeConnection(bridgeUrl, bridgeToken, bridgeTimeoutSec) {
+  const bridgeConfig = normalizeBridgeConfig({
+    bridgeEnabled: true,
+    bridgeUrl,
+    bridgeToken,
+    bridgeTimeoutSec
+  });
+
+  if (!bridgeConfig.url) {
+    return { success: false, message: '请先填写 Bridge URL' };
+  }
+
+  const headers = { 'Content-Type': 'application/json' };
+  if (bridgeConfig.token) {
+    headers.Authorization = bridgeConfig.token.startsWith('Bearer ')
+      ? bridgeConfig.token
+      : `Bearer ${bridgeConfig.token}`;
+  }
+
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error(`Bridge 请求超时（${bridgeConfig.timeoutMs / 1000}秒）`)), bridgeConfig.timeoutMs);
+  });
+
+  const fetchPromise = fetch(bridgeConfig.url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      mode: 'ping',
+      timestamp: new Date().toISOString()
+    })
+  });
+
+  const response = await Promise.race([fetchPromise, timeoutPromise]);
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    return { success: false, message: `Bridge 错误 ${response.status}: ${errorText || response.statusText}` };
+  }
+
+  const data = await response.json().catch(() => ({}));
+  return {
+    success: true,
+    message: data.message || data.status || 'Bridge 连接成功'
+  };
+}
+
 // ─── HTTP 工具 ────────────────────────────────────────────────────────────────
 
 function buildChatEndpoint(base, provider) {
@@ -1497,8 +2379,39 @@ function buildChatEndpoint(base, provider) {
 function normalizeAnthropicMessages(messages) {
   return (messages || []).map((message) => ({
     role: message.role === 'assistant' ? 'assistant' : 'user',
-    content: typeof message.content === 'string' ? message.content : String(message.content || '')
+    content: normalizeAnthropicContent(message.content)
   }));
+}
+
+function normalizeAnthropicContent(content) {
+  if (typeof content === 'string') {
+    return [{ type: 'text', text: content }];
+  }
+
+  if (!Array.isArray(content)) {
+    return [{ type: 'text', text: String(content || '') }];
+  }
+
+  return content.flatMap((part) => {
+    if (!part) return [];
+    if (part.type === 'text') {
+      return [{ type: 'text', text: String(part.text || '') }];
+    }
+    if (part.type === 'image_url') {
+      const url = part.image_url?.url || '';
+      const match = url.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+      if (!match) return [];
+      return [{
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: match[1],
+          data: match[2]
+        }
+      }];
+    }
+    return [];
+  });
 }
 
 async function callChatAPI(base, apiKey, provider, model, messages, opts = {}) {

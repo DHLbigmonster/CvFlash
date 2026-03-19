@@ -103,7 +103,12 @@ async function init() {
   modelBadge.textContent = settings.textModel || '未设置模型';
 
   if (!apiKey && provider.requiresKey) {
-    noApiWarning.classList.remove('hidden');
+    const bridgeEnabled = !!settings.bridgeEnabled && !!settings.bridgeUrl;
+    if (!bridgeEnabled) {
+      noApiWarning.classList.remove('hidden');
+    } else {
+      noApiWarning.classList.add('hidden');
+    }
   } else {
     noApiWarning.classList.add('hidden');
   }
@@ -254,7 +259,8 @@ async function handleFill() {
   const provider = modelConfig.getProviderById(
     settings.providerId || modelConfig.resolveProviderByBase(apiBase || '').id
   );
-  if (!apiKey && provider.requiresKey) { chrome.runtime.openOptionsPage(); return; }
+  const bridgeEnabled = !!settings.bridgeEnabled && !!settings.bridgeUrl;
+  if (!bridgeEnabled && !apiKey && provider.requiresKey) { chrome.runtime.openOptionsPage(); return; }
   if (!activeResume) {
     showStatus('请先选择简历', false);
     setTimeout(hideStatus, 2000);
@@ -275,7 +281,8 @@ async function handleFill() {
       apiKey,
       apiBase,
       providerId: settings.providerId,
-      model: settings.textModel
+      model: settings.textModel,
+      visionModel: settings.visionModel
     }).then(resp => {
       if (resp?.error) {
         showStatus('填充失败: ' + resp.error, false);

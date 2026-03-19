@@ -253,6 +253,38 @@
         </div>
 
         <div class="card">
+          <div class="card__title">Bridge 模式</div>
+          <label class="toggle-row">
+            <span>优先使用 Bridge API 决策</span>
+            <input type="checkbox" id="setting-bridge-enabled" class="toggle">
+          </label>
+
+          <div class="form-group">
+            <label class="label">Bridge URL</label>
+            <input type="text" id="bridge-url-input" class="input" placeholder="http://127.0.0.1:8787/decide">
+            <div class="form-hint">插件会把页面字段快照、简历数据、可选截图发到这个接口，并等待返回 commands 或 fieldMap。</div>
+          </div>
+
+          <div class="form-group">
+            <label class="label">Bridge Token（可选）</label>
+            <input type="password" id="bridge-token-input" class="input" placeholder="Bearer Token">
+            <div class="form-hint">如果你的本地/远程桥接服务需要鉴权，可在这里填写。</div>
+          </div>
+
+          <div class="form-group">
+            <label class="label">Bridge 超时（秒）</label>
+            <input type="number" id="bridge-timeout-input" class="input" min="5" max="180" step="1" placeholder="45">
+            <div class="form-hint">建议 30-60 秒。超时后会自动回退到内置模型链路。</div>
+          </div>
+
+          <div class="form-row">
+            <button class="btn btn--secondary" id="btn-test-bridge">测试 Bridge</button>
+          </div>
+
+          <div id="bridge-test-result" class="test-result hidden"></div>
+        </div>
+
+        <div class="card">
           <div class="card__title">本地接入提示</div>
           <div class="integration-notes">
             <div class="integration-note">

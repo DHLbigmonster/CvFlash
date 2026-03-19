@@ -27,6 +27,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     case 'AUTOFILL':
       handleAutofill(msg.fieldMap).then(sendResponse);
       return true;
+    case 'APPLY_COMMANDS':
+      handleApplyCommands(msg.commands).then(sendResponse);
+      return true;
+    case 'FOCUS_FIELD':
+      handleFocusField(msg.domIndex).then(sendResponse);
+      return true;
     case 'CLEAR_HIGHLIGHT':
       clearAllHighlights();
       sendResponse({ ok: true });
@@ -79,12 +85,63 @@ async function handleAutofill(fieldMap) {
   return { filledCount, skippedCount, clearedCount };
 }
 
+async function handleApplyCommands(commands) {
+  let appliedCount = 0, skippedCount = 0, clearedCount = 0;
+
+  for (const command of commands || []) {
+    const domIndex = Number(command?.domIndex);
+    const field = detectedFields.find(f => f._domIndex === domIndex);
+    if (!field) {
+      skippedCount++;
+      continue;
+    }
+
+    try {
+      const action = String(command.action || '').toLowerCase();
+      if (action === 'clear') {
+        await clearField(field);
+        clearedCount++;
+      } else if (action === 'toggle') {
+        await fillField(field, Boolean(command.value));
+        appliedCount++;
+      } else if (action === 'select' || action === 'set') {
+        await fillField(field, command.value ?? '');
+        highlightElement(field.element, 'success');
+        appliedCount++;
+      } else {
+        skippedCount++;
+      }
+    } catch (error) {
+      console.warn('[CVflash] 命令执行失败:', command, error);
+      skippedCount++;
+    }
+
+    await sleep(40);
+  }
+
+  const msg = clearedCount > 0
+    ? `✓ 已执行 ${appliedCount} 条命令，清除 ${clearedCount} 个旧值`
+    : `✓ 已执行 ${appliedCount} 条命令`;
+  showToast(msg, 'success');
+  return { appliedCount, skippedCount, clearedCount };
+}
+
+async function handleFocusField(domIndex) {
+  const field = detectedFields.find(f => f._domIndex === Number(domIndex));
+  if (!field?.element) return { ok: false };
+
+  field.element.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' });
+  highlightElement(field.element, 'detect');
+  await sleep(250);
+  return { ok: true, bbox: field.bbox || null };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 通用字段收集器
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const IGNORED_INPUT_TYPES = new Set([
-  'hidden', 'submit', 'button', 'reset', 'image', 'checkbox', 'radio'
+  'hidden', 'submit', 'button', 'reset', 'image', 'radio'
 ]);
 
 /**
@@ -99,6 +156,7 @@ function collectAllFields(root) {
     // 1. 标准表单元素
     node.querySelectorAll('input, textarea, select').forEach(el => {
       if (el.tagName === 'INPUT' && IGNORED_INPUT_TYPES.has(el.type)) return;
+      if (el.tagName === 'INPUT' && el.type === 'checkbox' && !shouldIncludeCheckbox(el)) return;
       if (!isInteractable(el)) return;
       if (el.dataset.cvflashScanned) return;
       el.dataset.cvflashScanned = '1';
@@ -201,6 +259,7 @@ function buildFieldDescriptor(el, index, typeOverride) {
     section: getFieldSection(el),
     hint: guessSemanticType(label, name, placeholder),
     currentValue: getCurrentValue(el),
+    checked: el.type === 'checkbox' ? !!el.checked : undefined,
     required: !!(el.required || el.getAttribute('aria-required') === 'true'),
     autocomplete: el.autocomplete || '',
     inputMode: el.inputMode || '',
@@ -378,6 +437,7 @@ const SEMANTIC_PATTERNS = [
   ['startDate',   /start.?date|available|entry|入职|开始时间|到岗/i],
   ['workType',    /work.?type|employment.?type|job.?type|全职|兼职|实习/i],
   ['workMode',    /remote|work.?mode|办公方式|远程/i],
+  ['currentFlag', /present|current|currently|至今|在职|在读|ongoing/i],
 
   // 教育 - 高优先级
   ['school',      /school|university|college|institution|学校|大学|院校/i],
@@ -417,7 +477,21 @@ function guessSemanticType(label, name, placeholder) {
 async function clearField(field) {
   const el = field.element;
   const tag = el.tagName.toUpperCase();
-  if (tag === 'SELECT') return; // select 不清除
+  if (tag === 'INPUT' && el.type === 'checkbox') {
+    await setCheckboxState(el, false);
+    return;
+  }
+  if (tag === 'SELECT') {
+    const emptyOption = Array.from(el.options).find(option => !option.value || !option.text.trim());
+    if (emptyOption) {
+      el.value = emptyOption.value;
+    } else {
+      el.selectedIndex = -1;
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return;
+  }
   if (field.type === 'contenteditable' || el.contentEditable === 'true') {
     el.innerHTML = '';
     el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -437,9 +511,18 @@ async function clearField(field) {
 async function fillField(field, value) {
   const el = field.element;
   const tag = el.tagName.toUpperCase();
+  const normalizedTarget = normalizeComparableText(value);
 
   el.focus();
   await sleep(40);
+
+  if (tag === 'INPUT' && el.type === 'checkbox') {
+    await setCheckboxState(el, Boolean(value));
+    if (Boolean(value)) {
+      await clearNearbyEndDateField(el);
+    }
+    return;
+  }
 
   if (field.type === 'contenteditable' || el.contentEditable === 'true') {
     el.innerHTML = '';
@@ -462,9 +545,18 @@ async function fillField(field, value) {
     || el.closest('.ant-select, .el-select, [class*="select-wrap"], [class*="dropdown-trigger"]')
     || el.getAttribute('aria-haspopup') === 'listbox';
   if (isCustomDropdown) {
+    const currentComparable = normalizeComparableText(getCurrentValue(el));
+    if (normalizedTarget && currentComparable && (currentComparable.includes(normalizedTarget) || normalizedTarget.includes(currentComparable))) {
+      return;
+    }
+
     const filled = await fillCustomDropdown(el, value);
     if (filled) return;
-    // fallback: 如果自定义下拉没成功，继续常规填充
+
+    // 选择型控件如果没真正选中，宁可保留原值，也不要误写文本
+    if (tag === 'INPUT' && (el.readOnly || field.type === 'aria-combobox' || field.options?.length)) {
+      throw new Error('自定义下拉未能成功选中目标选项');
+    }
   }
 
   if (field.type.startsWith('aria-')) {
@@ -481,7 +573,14 @@ async function fillField(field, value) {
 
   // 日期/月份字段特殊处理
   if (el.type === 'date' || el.type === 'month') {
+    await ensureNearbyCurrentCheckboxState(el, false);
     await fillDateInput(el, value);
+    return;
+  }
+
+  if (isDateLikeField(field, el)) {
+    await ensureNearbyCurrentCheckboxState(el, false);
+    await fillTextualDateInput(el, value);
     return;
   }
 
@@ -537,6 +636,29 @@ async function fillDateInput(el, value) {
   el.dispatchEvent(new Event('blur', { bubbles: true }));
 }
 
+async function fillTextualDateInput(el, value) {
+  const normalized = normalizeDateLikeValue(String(value).trim());
+  const displayValue = applyDateDisplayFormat(el, normalized);
+  const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+
+  if (nativeSetter) nativeSetter.call(el, '');
+  else el.value = '';
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  await sleep(20);
+
+  if (nativeSetter) nativeSetter.call(el, displayValue);
+  else el.value = displayValue;
+
+  const tracker = el._valueTracker;
+  if (tracker) tracker.setValue('');
+
+  el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: displayValue }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+  el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter' }));
+  el.dispatchEvent(new Event('blur', { bubbles: true }));
+}
+
 async function fillSelect(el, value) {
   const val = String(value).trim();
   const valLower = val.toLowerCase();
@@ -574,8 +696,7 @@ async function fillSelect(el, value) {
   for (const opt of dropdownOpts) {
     const optText = (opt.textContent || '').trim();
     if (optText && (optText === val || optText.toLowerCase().includes(valLower) || valLower.includes(optText.toLowerCase()))) {
-      opt.click();
-      await sleep(100);
+      await activateOptionNode(opt);
       return;
     }
   }
@@ -593,7 +714,191 @@ async function fillCustomDropdown(el, value) {
   el.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
   await sleep(350);
 
+  const searchInput = findDropdownSearchInput(el);
+  if (searchInput) {
+    await setNativeInputValue(searchInput, val);
+    await sleep(250);
+  }
+
   // 查找浮层选项（覆盖主流 UI 框架）
+  const allOpts = getDropdownOptionNodes();
+  if (allOpts.length === 0) {
+    return tryKeyboardSelect(el, val);
+  }
+
+  // 策略1: 精确匹配
+  for (const opt of allOpts) {
+    const text = (opt.textContent || '').trim();
+    if (text === val) { await activateOptionNode(opt); return true; }
+  }
+  // 策略2: 包含匹配
+  for (const opt of allOpts) {
+    const text = (opt.textContent || '').trim().toLowerCase();
+    if (text && (text.includes(valLower) || valLower.includes(text))) {
+      await activateOptionNode(opt); return true;
+    }
+  }
+  // 策略3: 归一化匹配
+  for (const opt of allOpts) {
+    const text = (opt.textContent || '').trim();
+    if (text && normalize(text) === normalize(val)) {
+      await activateOptionNode(opt); return true;
+    }
+  }
+  // 策略4: 数值模糊匹配（如 "3年" 匹配 "3-5年" 或 "3年以上"）
+  const numMatch = val.match(/\d+/);
+  if (numMatch) {
+    for (const opt of allOpts) {
+      const text = (opt.textContent || '').trim();
+      if (text.includes(numMatch[0])) {
+        await activateOptionNode(opt); return true;
+      }
+    }
+  }
+
+  // 策略5: 键盘回车选择首项（很多搜索型下拉依赖这个）
+  if (searchInput) {
+    searchInput.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowDown' }));
+    searchInput.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'ArrowDown' }));
+    await sleep(80);
+    searchInput.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+    searchInput.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter' }));
+    await sleep(150);
+    if (String(getCurrentValue(el) || '').trim()) return true;
+  }
+
+  // 关闭下拉
+  document.body.click();
+  await sleep(100);
+  return false;
+}
+
+async function setCheckboxState(el, shouldCheck) {
+  if (!!el.checked === !!shouldCheck) return;
+  el.click();
+  await sleep(80);
+  if (!!el.checked !== !!shouldCheck) {
+    el.checked = !!shouldCheck;
+  }
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  el.dispatchEvent(new Event('blur', { bubbles: true }));
+}
+
+async function activateOptionNode(node) {
+  node.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+  node.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  node.click();
+  await sleep(120);
+}
+
+async function ensureNearbyCurrentCheckboxState(el, shouldCheck) {
+  const checkbox = findNearbyCurrentCheckbox(el);
+  if (!checkbox) return;
+  await setCheckboxState(checkbox, shouldCheck);
+}
+
+async function clearNearbyEndDateField(checkboxEl) {
+  const endDateField = findNearbyEndDateField(checkboxEl);
+  if (!endDateField) return;
+
+  const fieldLike = {
+    element: endDateField,
+    type: endDateField.type || 'text',
+    tagName: endDateField.tagName?.toUpperCase() || '',
+    label: getLabel(endDateField),
+    name: endDateField.name || '',
+    placeholder: endDateField.placeholder || ''
+  };
+  await clearField(fieldLike);
+}
+
+function findNearbyCurrentCheckbox(el) {
+  const container = el.closest('form, fieldset, [class*="form-group"], [class*="form-row"], [class*="field-group"], [class*="repeatable"], [class*="section"], [class*="entry"], [class*="item"]')
+    || el.parentElement
+    || document.body;
+  const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"]'))
+    .filter(node => shouldIncludeCheckbox(node));
+  if (!checkboxes.length) return null;
+
+  const sourceRect = el.getBoundingClientRect();
+  return checkboxes
+    .map(node => ({ node, dist: distanceBetweenRects(sourceRect, node.getBoundingClientRect()) }))
+    .sort((a, b) => a.dist - b.dist)[0]?.node || null;
+}
+
+function findNearbyEndDateField(checkboxEl) {
+  const container = checkboxEl.closest('form, fieldset, [class*="form-group"], [class*="form-row"], [class*="field-group"], [class*="repeatable"], [class*="section"], [class*="entry"], [class*="item"]')
+    || checkboxEl.parentElement
+    || document.body;
+  const candidates = Array.from(container.querySelectorAll('input, textarea, select'))
+    .filter(node => node !== checkboxEl && isInteractable(node));
+
+  const scored = candidates
+    .map(node => {
+      const label = `${getLabel(node)} ${node.name || ''} ${node.placeholder || ''}`.toLowerCase();
+      const score = /结束|离职|毕业|to\b|end|until|结束时间|end.?date/.test(label) ? 0 : 1000;
+      return { node, score, dist: distanceBetweenRects(checkboxEl.getBoundingClientRect(), node.getBoundingClientRect()) };
+    })
+    .sort((a, b) => (a.score - b.score) || (a.dist - b.dist));
+
+  return scored[0]?.node || null;
+}
+
+function distanceBetweenRects(a, b) {
+  const ax = a.left + a.width / 2;
+  const ay = a.top + a.height / 2;
+  const bx = b.left + b.width / 2;
+  const by = b.top + b.height / 2;
+  return Math.hypot(ax - bx, ay - by);
+}
+
+function normalizeComparableText(value) {
+  return String(value ?? '')
+    .replace(/[\s\-_.,()（）【】/]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+function shouldIncludeCheckbox(el) {
+  const label = `${getLabel(el)} ${el.name || ''} ${el.id || ''}`.toLowerCase();
+  return /至今|当前|present|current|currently|在职|在读|ongoing/.test(label);
+}
+
+function isDateLikeField(field, el) {
+  if (el.tagName?.toUpperCase() !== 'INPUT') return false;
+  if (['date', 'month', 'datetime-local'].includes(el.type)) return true;
+  const text = `${field.label || ''} ${field.name || ''} ${field.placeholder || ''}`.toLowerCase();
+  return /日期|时间|start|end|from|to|毕业|入学|在职/.test(text);
+}
+
+function normalizeDateLikeValue(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (/^\d{4}[/-]\d{2}[/-]\d{2}$/.test(raw)) return raw.replace(/\//g, '-');
+  if (/^\d{4}-\d{2}$/.test(raw)) return raw;
+  const match = raw.match(/(\d{4})[./年-](\d{1,2})(?:[./月-](\d{1,2}))?/);
+  if (!match) return raw;
+  const year = match[1];
+  const month = String(match[2]).padStart(2, '0');
+  const day = match[3] ? `-${String(match[3]).padStart(2, '0')}` : '';
+  return `${year}-${month}${day}`;
+}
+
+function applyDateDisplayFormat(el, normalized) {
+  const current = String(el.value || el.placeholder || '').trim();
+  if (!normalized) return '';
+  if (current.includes('/')) return normalized.replace(/-/g, '/');
+  if (current.includes('.')) return normalized.replace(/-/g, '.');
+  if (current.includes('年')) {
+    const match = normalized.match(/^(\d{4})-(\d{2})(?:-(\d{2}))?$/);
+    if (!match) return normalized;
+    return match[3] ? `${match[1]}年${match[2]}月${match[3]}日` : `${match[1]}年${match[2]}月`;
+  }
+  return normalized;
+}
+
+function getDropdownOptionNodes() {
   const dropdownSelectors = [
     '[role="option"]', '[role="listbox"] li', '[role="listbox"] [role="option"]',
     '.ant-select-item-option', '.ant-select-item',
@@ -605,46 +910,57 @@ async function fillCustomDropdown(el, value) {
     '[class*="select-item"]', '[class*="picker-item"]'
   ].join(', ');
 
-  const allOpts = document.querySelectorAll(dropdownSelectors);
-  if (allOpts.length === 0) {
-    document.body.click();
-    return false;
+  return Array.from(document.querySelectorAll(dropdownSelectors)).filter(isVisibleNode);
+}
+
+function findDropdownSearchInput(el) {
+  const active = document.activeElement;
+  if (active && active.tagName === 'INPUT' && active !== el && isVisibleNode(active)) {
+    return active;
   }
 
-  // 策略1: 精确匹配
-  for (const opt of allOpts) {
-    const text = (opt.textContent || '').trim();
-    if (text === val) { opt.click(); await sleep(100); return true; }
-  }
-  // 策略2: 包含匹配
-  for (const opt of allOpts) {
-    const text = (opt.textContent || '').trim().toLowerCase();
-    if (text && (text.includes(valLower) || valLower.includes(text))) {
-      opt.click(); await sleep(100); return true;
-    }
-  }
-  // 策略3: 归一化匹配
-  for (const opt of allOpts) {
-    const text = (opt.textContent || '').trim();
-    if (text && normalize(text) === normalize(val)) {
-      opt.click(); await sleep(100); return true;
-    }
-  }
-  // 策略4: 数值模糊匹配（如 "3年" 匹配 "3-5年" 或 "3年以上"）
-  const numMatch = val.match(/\d+/);
-  if (numMatch) {
-    for (const opt of allOpts) {
-      const text = (opt.textContent || '').trim();
-      if (text.includes(numMatch[0])) {
-        opt.click(); await sleep(100); return true;
-      }
-    }
+  const root = el.closest('.ant-select, .el-select, [class*="select"], [class*="dropdown"]') || document.body;
+  const candidates = root.querySelectorAll('input:not([type="hidden"]):not([readonly]), [contenteditable="true"]');
+  return Array.from(candidates).find(node => node !== el && isVisibleNode(node)) || null;
+}
+
+async function setNativeInputValue(el, value) {
+  if (!el) return;
+  if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+    const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (nativeSetter) nativeSetter.call(el, '');
+    else el.value = '';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    await sleep(20);
+    if (nativeSetter) nativeSetter.call(el, value);
+    else el.value = value;
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return;
   }
 
-  // 关闭下拉
-  document.body.click();
+  if (el.contentEditable === 'true') {
+    el.textContent = value;
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+  }
+}
+
+async function tryKeyboardSelect(el, value) {
+  const target = document.activeElement && document.activeElement !== document.body ? document.activeElement : el;
+  if (!target) return false;
+  target.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowDown' }));
+  target.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'ArrowDown' }));
   await sleep(100);
-  return false;
+  target.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+  target.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter' }));
+  await sleep(150);
+
+  const currentValue = String(getCurrentValue(el) || '').trim();
+  if (!currentValue) return false;
+  const normalizedCurrent = currentValue.replace(/[\s\-_.,()（）【】]/g, '').toLowerCase();
+  const normalizedTarget = String(value || '').replace(/[\s\-_.,()（）【】]/g, '').toLowerCase();
+  return normalizedCurrent.includes(normalizedTarget) || normalizedTarget.includes(normalizedCurrent);
 }
 
 function getAriaOptions(el) {
@@ -661,8 +977,17 @@ function getAriaOptions(el) {
 }
 
 function getCurrentValue(el) {
+  if (el.type === 'checkbox') return !!el.checked;
   if (el.contentEditable === 'true') return el.textContent?.trim() || '';
   return el.value || '';
+}
+
+function isVisibleNode(node) {
+  if (!node || !(node instanceof Element)) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 || rect.height > 0;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -699,13 +1024,20 @@ if (document.readyState === 'complete') {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function isInteractable(el) {
-  if (el.disabled || el.readOnly) return false;
+  if (el.disabled) return false;
+  if (el.readOnly && !isCustomDropdownCandidate(el)) return false;
   const style = window.getComputedStyle(el);
   if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
   // 允许 position:fixed 元素（如悬浮表单）
   const rect = el.getBoundingClientRect();
   if (rect.width === 0 && rect.height === 0 && style.position !== 'fixed') return false;
   return true;
+}
+
+function isCustomDropdownCandidate(el) {
+  return el.getAttribute?.('role') === 'combobox'
+    || el.getAttribute?.('aria-haspopup') === 'listbox'
+    || el.closest?.('.ant-select, .el-select, [class*="select-wrap"], [class*="dropdown-trigger"]');
 }
 
 function cleanText(text) {
@@ -724,6 +1056,7 @@ function serializeFields(fields) {
     section: f.section || '',
     options: f.options || [],
     currentValue: f.currentValue,
+    checked: f.checked,
     required: !!f.required,
     autocomplete: f.autocomplete || '',
     inputMode: f.inputMode || '',

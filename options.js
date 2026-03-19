@@ -531,6 +531,10 @@ function loadAPISettings(data) {
   document.getElementById('api-key-input').value = data.cvflash_api_key || '';
   document.getElementById('setting-auto-detect').checked = settings.autoDetect ?? true;
   document.getElementById('setting-show-notification').checked = settings.showNotification ?? true;
+  document.getElementById('setting-bridge-enabled').checked = settings.bridgeEnabled ?? false;
+  document.getElementById('bridge-url-input').value = settings.bridgeUrl || '';
+  document.getElementById('bridge-token-input').value = settings.bridgeToken || '';
+  document.getElementById('bridge-timeout-input').value = settings.bridgeTimeoutSec || 45;
 
   renderProviderGrid();
   applyProviderSelection(storedProvider.id, {
@@ -646,7 +650,11 @@ function bindAPIActions() {
       textModel: document.getElementById('text-model-select').value,
       visionModel: document.getElementById('vision-model-select').value,
       autoDetect: document.getElementById('setting-auto-detect').checked,
-      showNotification: document.getElementById('setting-show-notification').checked
+      showNotification: document.getElementById('setting-show-notification').checked,
+      bridgeEnabled: document.getElementById('setting-bridge-enabled').checked,
+      bridgeUrl: document.getElementById('bridge-url-input').value.trim(),
+      bridgeToken: document.getElementById('bridge-token-input').value.trim(),
+      bridgeTimeoutSec: Number(document.getElementById('bridge-timeout-input').value) || 45
     };
     await chrome.storage.local.set({
       cvflash_api_key: apiKey,
@@ -669,6 +677,26 @@ function bindAPIActions() {
     resultEl.classList.remove('hidden');
 
     const resp = await chrome.runtime.sendMessage({ action: 'TEST_API', apiKey, apiBase, providerId: currentProviderId });
+    resultEl.textContent = resp.success ? '✓ ' + resp.message : '✗ ' + resp.message;
+    resultEl.classList.add(resp.success ? 'success' : 'error');
+  });
+
+  document.getElementById('btn-test-bridge').addEventListener('click', async () => {
+    const bridgeUrl = document.getElementById('bridge-url-input').value.trim();
+    const bridgeToken = document.getElementById('bridge-token-input').value.trim();
+    const bridgeTimeoutSec = Number(document.getElementById('bridge-timeout-input').value) || 45;
+    const resultEl = document.getElementById('bridge-test-result');
+
+    resultEl.textContent = '正在测试 Bridge...';
+    resultEl.className = 'test-result';
+    resultEl.classList.remove('hidden');
+
+    const resp = await chrome.runtime.sendMessage({
+      action: 'TEST_BRIDGE',
+      bridgeUrl,
+      bridgeToken,
+      bridgeTimeoutSec
+    });
     resultEl.textContent = resp.success ? '✓ ' + resp.message : '✗ ' + resp.message;
     resultEl.classList.add(resp.success ? 'success' : 'error');
   });

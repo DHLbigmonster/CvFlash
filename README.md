@@ -48,6 +48,27 @@
 
 > 💡 提示：如果招聘表单需要多段经历（如多个实习），请先手动在网页上添加足够的条目，再运行填充。
 
+## Bridge 模式
+
+插件现在支持 `Bridge API` 模式：
+
+1. 插件抓取当前登录后、JS 渲染完成的页面字段快照
+2. 将字段、当前值、分区、简历数据、可选截图 POST 给你的本地/远程 API
+3. 你的 API 返回 `commands` 或 `fieldMap`
+4. 插件执行命令回填
+
+设置路径：
+
+1. 打开设置页 → `模型与接口`
+2. 勾选 `优先使用 Bridge API 决策`
+3. 填写 `Bridge URL`
+4. 点击 `测试 Bridge`
+
+示例 Bridge 服务见：
+
+- [bridge-example/README.md](/Users/chaosmac/Desktop/CVmax/bridge-example/README.md)
+- [bridge-example/server.mjs](/Users/chaosmac/Desktop/CVmax/bridge-example/server.mjs)
+
 ## 技术栈
 
 - Chrome Extension Manifest V3
