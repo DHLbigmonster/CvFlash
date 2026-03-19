@@ -226,14 +226,21 @@ async function handlePreAnalysis({ tabId, resume, apiKey, apiBase, providerId, m
     formSummary.push({ name: sectionName, fieldCount: sectionFields.length, groupCount, fieldLabels });
   }
 
-  // 3. 构建简历摘要
+  // 3. 构建简历摘要（兼容嵌套结构 resume.resume.xxx 或 resume.xxx）
+  const r = resume.resume || resume;
+  // 计算各类别的数据量（personal 按非空字段数统计，其他按数组长度）
+  const personalFields = r.personal ? Object.values(r.personal).filter(v => v && String(v).trim()).length : 0;
   const resumeCounts = {
-    education: resume.education?.length || 0,
-    experience: resume.experience?.length || 0,
-    projects: resume.projects?.length || 0,
-    activities: resume.activities?.length || 0,
-    research: resume.research?.length || 0
+    personal: personalFields,
+    education: r.education?.length || 0,
+    experience: r.experience?.length || 0,
+    projects: r.projects?.length || 0,
+    skills: r.skills?.length || 0,
+    activities: r.activities?.length || 0,
+    research: r.research?.length || 0,
+    summary: r.summary ? 1 : 0
   };
+  console.log('[预分析] 简历数据量:', resumeCounts);
 
   // 4. AI 分析
   const base = apiBase || API_BASES.cn;
@@ -254,9 +261,12 @@ async function handlePreAnalysis({ tabId, resume, apiKey, apiBase, providerId, m
 ${formSummary.map(s => `- "${s.name}": ${s.fieldCount}个字段, 约${s.groupCount}组条目, 字段包含: ${s.fieldLabels.join(', ')}`).join('\n')}
 
 【简历数据量】
+- 基本信息(personal): ${resumeCounts.personal} 个字段有值
+- 个人简介/求职意向(summary): ${resumeCounts.summary ? '有' : '无'}
 - 教育经历: ${resumeCounts.education} 条
 - 工作/实习经历: ${resumeCounts.experience} 条
 - 项目经历: ${resumeCounts.projects} 条
+- 技能(skills): ${resumeCounts.skills} 条
 - 校园/社团经历: ${resumeCounts.activities} 条
 - 科研经历: ${resumeCounts.research} 条
 
@@ -267,7 +277,7 @@ ${formSummary.map(s => `- "${s.name}": ${s.fieldCount}个字段, 约${s.groupCou
 3. 用户是否需要手动在网页上添加更多条目？
 
 返回纯JSON数组（不要解释），每项格式：
-{"section":"分区名","category":"education|experience|projects|activities|research|other","formSlots":数字,"resumeEntries":数字,"gap":数字,"action":"ok|need_add|no_data","hint":"提示文字"}
+{"section":"分区名","category":"personal|summary|education|experience|projects|skills|activities|research|other","formSlots":数字,"resumeEntries":数字,"gap":数字,"action":"ok|need_add|no_data","hint":"提示文字"}
 
 gap = max(0, resumeEntries - formSlots)
 action: "ok"=够用, "need_add"=需要手动添加, "no_data"=简历无此类数据`;
@@ -289,9 +299,12 @@ action: "ok"=够用, "need_add"=需要手动添加, "no_data"=简历无此类数
 function localCompareFormResume(formSummary, resumeCounts) {
   const results = [];
   const categoryMap = {
+    '基本': 'personal', '个人信息': 'personal', 'Basic': 'personal', 'Personal': 'personal',
+    '求职意向': 'summary', '自我评价': 'summary', '个人简介': 'summary', 'Summary': 'summary', 'Profile': 'summary',
     '教育': 'education', 'Education': 'education',
     '实习': 'experience', '工作': 'experience', 'Employment': 'experience', 'Work': 'experience',
     '项目': 'projects', 'Project': 'projects',
+    '技能': 'skills', 'Skill': 'skills',
     '校园': 'activities', '社团': 'activities', '活动': 'activities',
     '科研': 'research', 'Research': 'research',
     '创业': 'experience', '获奖': 'other', '作品': 'other'
@@ -305,13 +318,23 @@ function localCompareFormResume(formSummary, resumeCounts) {
 
     const resumeEntries = resumeCounts[category] || 0;
     const formSlots = section.groupCount;
-    const gap = Math.max(0, resumeEntries - formSlots);
 
-    results.push({
-      section: section.name, category, formSlots, resumeEntries, gap,
-      action: gap > 0 ? 'need_add' : (resumeEntries === 0 ? 'no_data' : 'ok'),
-      hint: gap > 0 ? `需要手动添加 ${gap} 条` : (resumeEntries === 0 ? '简历无此类数据' : '数量匹配')
-    });
+    // personal/summary 类型不按条目数对比，只看有无数据
+    if (category === 'personal' || category === 'summary') {
+      results.push({
+        section: section.name, category, formSlots: section.fieldCount, resumeEntries,
+        gap: 0,
+        action: resumeEntries > 0 ? 'ok' : 'no_data',
+        hint: resumeEntries > 0 ? `简历有${resumeEntries}项数据` : '简历无此类数据'
+      });
+    } else {
+      const gap = Math.max(0, resumeEntries - formSlots);
+      results.push({
+        section: section.name, category, formSlots, resumeEntries, gap,
+        action: gap > 0 ? 'need_add' : (resumeEntries === 0 ? 'no_data' : 'ok'),
+        hint: gap > 0 ? `需要手动添加 ${gap} 条` : (resumeEntries === 0 ? '简历无此类数据' : '数量匹配')
+      });
+    }
   }
   return results;
 }

@@ -27,6 +27,7 @@ let activeResume = null;
 let apiKey = '';
 let apiBase = '';
 let settings = {};
+let cachedAnalysis = null; // 缓存预分析结果
 
 const modelConfig = globalThis.CVFLASH_MODEL_CONFIG;
 
@@ -120,6 +121,18 @@ async function init() {
     }
   }
 
+  // 恢复缓存的预分析结果
+  const cached = await chrome.storage.session?.get?.('cvflash_analysis').catch(() => null);
+  if (cached?.cvflash_analysis) {
+    cachedAnalysis = cached.cvflash_analysis;
+    if (cachedAnalysis.fieldCount > 0) {
+      updateFieldBadge(cachedAnalysis.fieldCount);
+      detectedFields = new Array(cachedAnalysis.fieldCount);
+      btnFill.disabled = false;
+      renderAnalysisResults(cachedAnalysis.sections || []);
+    }
+  }
+
   // 检查是否有正在进行的后台填充任务
   chrome.runtime.sendMessage({ action: 'GET_FILL_STATUS' }, (status) => {
     if (chrome.runtime.lastError) return;
@@ -196,6 +209,9 @@ async function handleDetect() {
 
     if (fieldCount > 0) {
       btnFill.disabled = false;
+      cachedAnalysis = analysisResp;
+      // 缓存到 session storage，popup 重新打开时恢复
+      chrome.storage.session?.set?.({ cvflash_analysis: analysisResp }).catch(() => {});
       renderAnalysisResults(analysisResp.sections || []);
       hideStatus();
     } else {
@@ -224,7 +240,7 @@ function renderAnalysisResults(sections) {
     <div class="analysis-item">
       <span class="analysis-item__icon">${iconMap[s.action] || '?'}</span>
       <span class="analysis-item__name">${escapeHtml(s.section)}</span>
-      <span class="analysis-item__detail">表单${s.formSlots}组 / 简历${s.resumeEntries}条</span>
+      <span class="analysis-item__detail">${s.category === 'personal' || s.category === 'summary' ? `${s.formSlots}个字段 / 简历${s.resumeEntries}项` : `表单${s.formSlots}组 / 简历${s.resumeEntries}条`}</span>
       <span class="analysis-item__action analysis-item__action--${classMap[s.action] || 'gray'}">${escapeHtml(s.hint)}</span>
     </div>
   `).join('');

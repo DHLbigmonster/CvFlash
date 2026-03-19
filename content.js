@@ -425,6 +425,18 @@ async function fillField(field, value) {
     return;
   }
 
+  // 自定义下拉组件（aria-combobox、readonly input、UI框架 select 组件等）
+  const isCustomDropdown = field.type === 'aria-combobox'
+    || (field.options && field.options.length > 0)
+    || (tag === 'INPUT' && el.readOnly && el.type !== 'date' && el.type !== 'month')
+    || el.closest('.ant-select, .el-select, [class*="select-wrap"], [class*="dropdown-trigger"]')
+    || el.getAttribute('aria-haspopup') === 'listbox';
+  if (isCustomDropdown) {
+    const filled = await fillCustomDropdown(el, value);
+    if (filled) return;
+    // fallback: 如果自定义下拉没成功，继续常规填充
+  }
+
   if (field.type.startsWith('aria-')) {
     el.textContent = '';
     el.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
@@ -539,6 +551,70 @@ async function fillSelect(el, value) {
   }
   // 点击空白关闭弹出
   document.body.click();
+}
+
+async function fillCustomDropdown(el, value) {
+  const val = String(value).trim();
+  const valLower = val.toLowerCase();
+  const normalize = s => s.replace(/[\s\-_.,()（）【】]/g, '').toLowerCase();
+
+  // 点击触发元素展开下拉
+  el.click();
+  el.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+  await sleep(350);
+
+  // 查找浮层选项（覆盖主流 UI 框架）
+  const dropdownSelectors = [
+    '[role="option"]', '[role="listbox"] li', '[role="listbox"] [role="option"]',
+    '.ant-select-item-option', '.ant-select-item',
+    '.el-select-dropdown__item', '.el-option',
+    '.ant-cascader-menu-item',
+    '.rc-virtual-list-holder-inner [role="option"]',
+    '[class*="option"]:not(select)', '[class*="dropdown"] li',
+    '[class*="menu-item"]', '[class*="list-item"]',
+    '[class*="select-item"]', '[class*="picker-item"]'
+  ].join(', ');
+
+  const allOpts = document.querySelectorAll(dropdownSelectors);
+  if (allOpts.length === 0) {
+    document.body.click();
+    return false;
+  }
+
+  // 策略1: 精确匹配
+  for (const opt of allOpts) {
+    const text = (opt.textContent || '').trim();
+    if (text === val) { opt.click(); await sleep(100); return true; }
+  }
+  // 策略2: 包含匹配
+  for (const opt of allOpts) {
+    const text = (opt.textContent || '').trim().toLowerCase();
+    if (text && (text.includes(valLower) || valLower.includes(text))) {
+      opt.click(); await sleep(100); return true;
+    }
+  }
+  // 策略3: 归一化匹配
+  for (const opt of allOpts) {
+    const text = (opt.textContent || '').trim();
+    if (text && normalize(text) === normalize(val)) {
+      opt.click(); await sleep(100); return true;
+    }
+  }
+  // 策略4: 数值模糊匹配（如 "3年" 匹配 "3-5年" 或 "3年以上"）
+  const numMatch = val.match(/\d+/);
+  if (numMatch) {
+    for (const opt of allOpts) {
+      const text = (opt.textContent || '').trim();
+      if (text.includes(numMatch[0])) {
+        opt.click(); await sleep(100); return true;
+      }
+    }
+  }
+
+  // 关闭下拉
+  document.body.click();
+  await sleep(100);
+  return false;
 }
 
 function getAriaOptions(el) {
