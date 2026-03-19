@@ -239,7 +239,41 @@ chrome.runtime.onMessage.addListener((msg) => {
       showStatus(msg.message, true);
     }
   }
+
+  // 问题1：显示简历条目 vs 表单字段缺口提示
+  if (msg.action === 'FILL_MISSING_HINT' && msg.hints?.length > 0) {
+    showMissingHint(msg.hints);
+  }
 });
+
+// ─── 缺口提示（简历有条目但表单字段不够）────────────────────────────────────
+
+function showMissingHint(hints) {
+  // 如果已有提示框就先移除
+  const existing = document.getElementById('cvmax-missing-hint');
+  if (existing) existing.remove();
+
+  const div = document.createElement('div');
+  div.id = 'cvmax-missing-hint';
+  div.style.cssText = `
+    background: #fff3cd; border: 1px solid #ffc107; border-radius: 6px;
+    padding: 8px 10px; margin: 8px 0; font-size: 12px; color: #856404;
+  `;
+  div.innerHTML = `<strong>⚠️ 建议先在网页手动添加更多条目：</strong><ul style="margin:4px 0 0 14px;padding:0">` +
+    hints.map(h => `<li>${h}</li>`).join('') +
+    `</ul><div style="margin-top:4px;font-size:11px;color:#6c757d">手动添加后请重新点击「AI自动填充」</div>`;
+
+  // 插入到状态栏下方
+  const statusEl = document.getElementById('status') || document.querySelector('.status');
+  if (statusEl) {
+    statusEl.insertAdjacentElement('afterend', div);
+  } else {
+    document.body.appendChild(div);
+  }
+
+  // 10秒后自动消失
+  setTimeout(() => div.remove(), 10000);
+}
 
 // ─── 视觉模式（已合并到主填充流程）────────────────────────────────────────────
 

@@ -49,11 +49,20 @@ async function handleDetect() {
 // ─── 填充 ─────────────────────────────────────────────────────────────────────
 
 async function handleAutofill(fieldMap) {
-  let filledCount = 0, skippedCount = 0;
+  let filledCount = 0, skippedCount = 0, alreadyFilledCount = 0;
   for (const [domIndex, value] of Object.entries(fieldMap)) {
     if (value == null || value === '') { skippedCount++; continue; }
     const field = detectedFields.find(f => f._domIndex === Number(domIndex));
     if (!field) { skippedCount++; continue; }
+
+    // 问题2修复：跳过已有内容的字段，避免重复填充
+    const currentVal = getCurrentValue(field.element);
+    if (currentVal && String(currentVal).trim() !== '') {
+      console.log(`[CVmax] 跳过已填写字段: "${field.label}" 当前值="${currentVal}"`);
+      alreadyFilledCount++;
+      continue;
+    }
+
     try {
       await fillField(field, value);
       highlightElement(field.element, 'success');
@@ -63,8 +72,9 @@ async function handleAutofill(fieldMap) {
       skippedCount++;
     }
   }
-  showToast(`✓ 已填充 ${filledCount} 个字段，跳过 ${skippedCount} 个`, 'success');
-  return { filledCount, skippedCount };
+  const skipMsg = alreadyFilledCount > 0 ? `，${alreadyFilledCount} 个已有内容跳过` : '';
+  showToast(`✓ 已填充 ${filledCount} 个字段${skipMsg}`, 'success');
+  return { filledCount, skippedCount, alreadyFilledCount };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

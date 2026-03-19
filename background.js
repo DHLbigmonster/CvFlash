@@ -100,6 +100,15 @@ async function handleFullFill({ tabId, resume, apiKey, apiBase, model }) {
     const sectionGroups = groupFieldsBySection(fields);
     console.log('=== 表单分区信息 ===', Object.keys(sectionGroups).map(s => `${s}: ${sectionGroups[s].length}个字段`));
 
+    // 问题1提示：检测简历有多少条目 vs 表单有多少对应字段，提示用户是否需要手动添加更多条目
+    const missingHints = detectMissingEntries(fields, resume, sectionGroups);
+    if (missingHints.length > 0) {
+      console.warn('⚠️ 以下简历数据可能没有对应的表单字段（建议先手动添加更多条目）:');
+      missingHints.forEach(h => console.warn(`  - ${h}`));
+      // 通知 popup 显示提示（非阻塞）
+      chrome.runtime.sendMessage({ action: 'FILL_MISSING_HINT', hints: missingHints }).catch(() => {});
+    }
+
     // 3. 分区块依次处理
     const totalSections = Object.keys(sectionGroups).length;
     let currentSection = 0;
@@ -239,6 +248,54 @@ function groupFieldsBySection(fields) {
   }
 
   return result;
+}
+
+// ─── 检测简历条目 vs 表单字段的缺口 ──────────────────────────────────────────
+
+/**
+ * 检测简历中有多少条目，而表单中对应分区可能字段不够
+ * 返回提示信息列表，让用户知道需要手动添加更多条目
+ */
+function detectMissingEntries(fields, resume, sectionGroups) {
+  const hints = [];
+
+  // 计算表单中各类分区的字段组数（每组代表一个条目）
+  const countGroups = (sectionKeywords) => {
+    let maxGroups = 0;
+    for (const [sectionName, sectionFields] of Object.entries(sectionGroups)) {
+      if (sectionKeywords.some(kw => sectionName.includes(kw))) {
+        // 计算该分区有多少独立的 group
+        const groupIds = new Set(sectionFields.map(f => f.group?.id || `single_${f._domIndex}`));
+        maxGroups = Math.max(maxGroups, groupIds.size > 1 ? groupIds.size : Math.ceil(sectionFields.length / 3));
+      }
+    }
+    return maxGroups;
+  };
+
+  const eduCount = resume.education?.length || 0;
+  const expCount = resume.experience?.length || 0;
+  const projCount = resume.projects?.length || 0;
+  const actCount = resume.activities?.length || 0;
+
+  const formEduGroups = countGroups(['教育', 'Education']);
+  const formExpGroups = countGroups(['工作', '实习', 'Employment', 'Work', 'Experience']);
+  const formProjGroups = countGroups(['项目', 'Project']);
+  const formActGroups = countGroups(['校园', '社团', '活动', '创业', 'Activity']);
+
+  if (eduCount > formEduGroups && formEduGroups > 0) {
+    hints.push(`教育经历：简历有 ${eduCount} 条，表单约 ${formEduGroups} 组字段，可能需要手动添加 ${eduCount - formEduGroups} 条`);
+  }
+  if (expCount > formExpGroups && formExpGroups > 0) {
+    hints.push(`工作/实习经历：简历有 ${expCount} 条，表单约 ${formExpGroups} 组字段，可能需要手动添加 ${expCount - formExpGroups} 条`);
+  }
+  if (projCount > formProjGroups && formProjGroups > 0) {
+    hints.push(`项目经历：简历有 ${projCount} 条，表单约 ${formProjGroups} 组字段，可能需要手动添加 ${projCount - formProjGroups} 条`);
+  }
+  if (actCount > 0 && formActGroups === 0) {
+    hints.push(`校园/社团/创业经历：简历有 ${actCount} 条，但表单中未找到对应分区字段`);
+  }
+
+  return hints;
 }
 
 // ─── 本地规则候选（作为 AI 提示与高置信度兜底）──────────────────────────────
@@ -663,32 +720,32 @@ ${resumeSummary}
 ${buildFieldHintsPrompt(fields, fieldHints)}
 
 【执行规则】
-- 你必须优先自行理解字段语义，再参考规则候选，不能机械照抄
-- 同一组字段必须尽量来自同一条教育/工作/项目经历
-- 多组重复字段按时间从近到远分配
-- 项目经历字段：项目名称→project.name，项目角色→project.role，项目描述→project.description，项目链接→project.url
-- 项目经历与实习经历的区别：
-  * 实习经历：有公司名称、职位名称、通常是正式的工作实习
-  * 项目经历：有项目名称、项目角色/负责人、可能是个人项目、课程项目、开源项目或AI项目
-- 识别项目字段的关键词：项目名称、项目描述、项目角色、项目链接、project name、project description
-- 若字段提供选项，返回值必须优先贴近选项文本
-- 邮箱必须包含 @；电话以数字为主；学校不能是邮箱；公司不能是邮箱
-- 无法判断时返回 null，不要编造
+1. 优先自行理解字段语义，参考规则候选，不能机械照抄
+2. 同一组字段必须来自同一条记录（同一学校/公司/项目）
+3. 多组重复字段按时间从近到远分配（最近的经历排第1组）
+4. 有 当前值="..." 标注的字段说明已有内容，返回 null 跳过，不要覆盖
+5. 若字段提供选项，返回值必须完全匹配选项文本之一
+6. 邮箱必须含@；电话纯数字；学校不能是邮箱或城市名；公司不能是邮箱
 
-【项目经历字段特别说明】
-- 项目名称（Project Name）：个人项目、AI项目、课程项目、开源项目的名称
-- 项目角色（Project Role）：项目负责人、开发者、策划者、设计者等
-- 项目描述（Project Description）：项目的完整描述，包括技术栈、功能、成果
-- 项目链接（Project URL）：项目网址、GitHub链接等
-- AI项目示例：MoodPulse、CVmax简历投递插件、AI聊天助手、大模型应用等都是项目经历
+【分区字段映射规则】
+- 教育经历 → 使用简历中 education 数据（学校、学位、专业、时间）
+- 工作/实习经历 → 使用简历中 experience 数据（公司、职位、时间、描述）
+- 项目经历 → 使用简历中 projects 数据（项目名、角色、描述、链接）
+  ⚠️ 项目名称字段必须填写实际项目名称，绝对不能返回 null！
+  ⚠️ 项目名称示例：MoodPulse、CVmax简历投递插件、高频交易预测模型
+- 科研经历 → 使用简历中 research 数据（机构、课题、时间、描述）
+- 校园/社团经历 → 使用简历中 activities 数据（组织、职务、时间、描述）
+- 创业类经历 → 使用简历中 experience（isInternship=false的创业/自营经历）或 activities 数据
+  创业经历判断依据：联合创始人、创始人、自营、创业、店长等职位关键词
+- 获奖经历 → 使用简历中 awards 数据
+- 作品/技能 → 使用简历中 skills、certifications、hobbies、customSections 数据
 
 【输出要求】
-- 覆盖所有字段，未命中返回 null
-- 只返回一个 JSON 对象
-- 不要解释，不要 markdown，不要代码块
-- 格式：{"字段_domIndex号":"填充值", "字段_domIndex号":null}
+- 覆盖所有字段，已有内容的字段返回 null，真正无法判断时也返回 null
+- 只返回一个 JSON 对象，不要解释，不要 markdown
+- 格式：{"domIndex":"填充值"}
 
-示例：{"0":"丁宏磊","1":"3043755156@qq.com","5":"上海外国语大学","6":null,"10":"MoodPulse","11":"项目负责人","12":"个人情绪与精力管理记录与预测工具"}`;
+示例：{"0":"丁宏磊","1":"3043755156@qq.com","5":"上海外国语大学","10":"MoodPulse","11":"项目负责人","15":null}`;
 }
 
 function buildFocusedFillPrompt(unresolvedFields, resumeSummary, allFields, fieldHints = {}, existingFieldMap = {}) {
@@ -1613,12 +1670,15 @@ function buildResumeSummary(resume) {
   if (resume.experience?.length) {
     lines.push('【工作/实习经历】');
     resume.experience.forEach((e, idx) => {
-      const tag = e.isInternship ? '[实习]' : '[工作]';
+      // 判断是否是创业经历
+      const isStartup = /创始人|联合创始人|创业|自营|店长|合伙人|founder|co-founder|entrepreneur/i.test(e.position || '');
+      const tag = isStartup ? '[创业]' : (e.isInternship ? '[实习]' : '[工作]');
       lines.push(`${tag}#${idx + 1}`);
       lines.push(`  [公司] ${e.company || ''}`);
       lines.push(`  [职位] ${e.position || ''}`);
       lines.push(`  [开始时间] ${e.startDate || ''}`);
       lines.push(`  [结束时间] ${e.current ? '至今' : (e.endDate || '')}`);
+      if (isStartup) lines.push(`  [备注] 此条为创业经历，适合填入"创业类经历"表单分区`);
       if (e.description) lines.push(`  [描述] ${e.description}`);
     });
     lines.push('');
