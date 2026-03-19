@@ -46,8 +46,12 @@
 
         <!-- PDF Upload Progress -->
         <div id="pdf-progress" class="pdf-progress hidden">
+          <div class="pdf-progress__header">
+            <span id="pdf-progress-text" class="pdf-progress__text">正在解析 PDF...</span>
+            <span id="pdf-progress-timer" class="pdf-progress__timer"></span>
+          </div>
           <div class="pdf-progress__bar"><div id="pdf-progress-fill" class="pdf-progress__fill"></div></div>
-          <div id="pdf-progress-text" class="pdf-progress__text">正在解析 PDF...</div>
+          <div id="pdf-batch-status" class="pdf-batch-status hidden"></div>
         </div>
 
         <!-- Resume Editor -->
@@ -323,7 +327,7 @@
 
   <!-- Hidden file inputs -->
   <input type="file" id="file-import" accept=".json" style="display:none">
-  <input type="file" id="file-pdf" accept=".pdf" style="display:none">
+  <input type="file" id="file-pdf" accept=".pdf" multiple style="display:none">
 
   <script src="lib/pdf.min.js"></script>
   <script src="options.js"></script>

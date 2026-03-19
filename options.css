@@ -287,7 +287,14 @@ html, body {
   width: 0%;
 }
 
+.pdf-progress__header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .pdf-progress__text { font-size: 12px; color: var(--text-muted); }
+.pdf-progress__timer { font-size: 11px; color: var(--text-muted); opacity: 0.7; font-variant-numeric: tabular-nums; }
+.pdf-batch-status { font-size: 12px; color: var(--text-muted); margin-top: 8px; display: flex; flex-direction: column; gap: 3px; }
+.pdf-batch-status__item { display: flex; align-items: center; gap: 6px; }
+.pdf-batch-status__item--done { color: var(--green); }
+.pdf-batch-status__item--error { color: var(--red); }
+.pdf-batch-status__item--active { color: var(--text); }
 
 /* ── Resume Card category tag ────────────────────────────────────────────── */
 

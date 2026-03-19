@@ -171,10 +171,10 @@ function bindResumeActions() {
   });
 
   document.getElementById('file-pdf').addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+    const files = Array.from(e.target.files);
+    if (!files.length) return;
     e.target.value = '';
-    await handlePDFUpload(file);
+    await handleBatchPDFUpload(files);
   });
 
   // Editor buttons
@@ -595,70 +595,106 @@ function createEmptyResume(name, category = '') {
 
 // ─── PDF 上传解析 ──────────────────────────────────────────────────────────────
 
-async function handlePDFUpload(file) {
+// ─── 批量 PDF 上传（支持单个或多个文件）──────────────────────────────────────
+
+async function handleBatchPDFUpload(files) {
   const progressEl = document.getElementById('pdf-progress');
   const fillEl = document.getElementById('pdf-progress-fill');
   const textEl = document.getElementById('pdf-progress-text');
+  const timerEl = document.getElementById('pdf-progress-timer');
+  const batchEl = document.getElementById('pdf-batch-status');
 
-  function setProgress(pct, msg) {
-    progressEl.classList.remove('hidden');
-    fillEl.style.width = pct + '%';
-    textEl.textContent = msg;
+  // 先检查 API Key
+  const storageData = await chrome.storage.local.get(['cvflash_api_key', 'cvflash_api_base', 'cvflash_settings']);
+  const apiKey = storageData.cvflash_api_key || '';
+  if (!apiKey) {
+    alert('请先在「API 设置」中填写 API Key，再上传 PDF');
+    return;
   }
 
-  try {
-    setProgress(10, '正在读取 PDF 文件...');
-    const arrayBuffer = await file.arrayBuffer();
+  const isBatch = files.length > 1;
+  const results = []; // { file, status: 'done'|'error'|'scan', resume, error }
 
-    setProgress(30, '正在提取文本内容（PDF.js）...');
-    // 动态导入 PDF 解析器（ES module）
-    const { extractTextFromPDF } = await import('./lib/pdf-parser.js');
+  progressEl.classList.remove('hidden');
+  batchEl.classList.toggle('hidden', !isBatch);
 
-    let extractedText = '';
-    let isScanPDF = false;
+  // 渲染批量列表
+  function renderBatchList() {
+    if (!isBatch) return;
+    batchEl.innerHTML = results.map((r, i) => {
+      const icon = r.status === 'done' ? '✓' : r.status === 'error' ? '✗' : r.status === 'scan' ? '⚠' : '⏳';
+      const cls = r.status === 'done' ? 'done' : r.status === 'error' ? 'error' : 'active';
+      const label = r.status === 'done'
+        ? `${r.file.name} — ${r.resume?.personal?.name || '解析成功'}`
+        : r.status === 'error'
+        ? `${r.file.name} — 失败: ${r.error}`
+        : r.status === 'scan'
+        ? `${r.file.name} — 扫描版，已跳过`
+        : `${r.file.name} — 处理中...`;
+      return `<div class="pdf-batch-status__item pdf-batch-status__item--${cls}">${icon} ${label}</div>`;
+    }).join('');
+  }
+
+  // 计时器：显示实际耗时
+  let startTime = Date.now();
+  const timerInterval = setInterval(() => {
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    timerEl.textContent = `已耗时 ${elapsed}s`;
+  }, 500);
+
+  // 动态导入一次
+  const { extractTextFromPDF } = await import('./lib/pdf-parser.js');
+  const settings = storageData.cvflash_settings || {};
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const overallPct = Math.round((i / files.length) * 100);
+
+    // 初始化该文件的状态
+    results.push({ file, status: 'active', resume: null, error: null });
+    renderBatchList();
+
     try {
-      extractedText = await extractTextFromPDF(arrayBuffer);
-    } catch (pdfErr) {
-      if (pdfErr.message === 'SCAN_PDF') {
-        isScanPDF = true;
-      } else {
-        throw pdfErr;
+      // Step 1: 读取文件
+      fillEl.style.width = (overallPct + 5) + '%';
+      textEl.textContent = isBatch
+        ? `[${i + 1}/${files.length}] 读取文件...`
+        : '正在读取 PDF 文件...';
+      const arrayBuffer = await file.arrayBuffer();
+
+      // Step 2: 提取文本
+      fillEl.style.width = (overallPct + 10) + '%';
+      textEl.textContent = isBatch
+        ? `[${i + 1}/${files.length}] 提取文字内容...`
+        : '正在提取文字内容...';
+
+      let extractedText = '';
+      let isScanPDF = false;
+      try {
+        extractedText = await extractTextFromPDF(arrayBuffer);
+      } catch (pdfErr) {
+        if (pdfErr.message === 'SCAN_PDF') {
+          isScanPDF = true;
+        } else {
+          throw pdfErr;
+        }
       }
-    }
 
-    const storageData = await chrome.storage.local.get(['cvflash_api_key', 'cvflash_api_base', 'cvflash_settings']);
-    const apiKey = storageData.cvflash_api_key || '';
+      if (isScanPDF) {
+        results[i].status = 'scan';
+        renderBatchList();
+        continue;
+      }
 
-    if (!apiKey) {
-      progressEl.classList.add('hidden');
-      alert('请先在「API 设置」中填写 API Key，再上传 PDF');
-      return;
-    }
+      // Step 3: AI 解析（显示实时计时，不再写死估计时间）
+      startTime = Date.now(); // 重置计时起点到 AI 调用开始
+      fillEl.style.width = (overallPct + 20) + '%';
+      textEl.textContent = isBatch
+        ? `[${i + 1}/${files.length}] AI 解析中...`
+        : 'AI 解析中...';
+      timerEl.textContent = '已耗时 0s';
 
-    const settings = storageData.cvflash_settings || {};
-
-    if (isScanPDF) {
-      setProgress(40, '未找到文字内容，此 PDF 可能为扫描版...');
-      setTimeout(() => {
-        progressEl.classList.add('hidden');
-        alert('PDF 文本提取失败。\n\n可能原因：\n1. 扫描版 PDF（图片格式）\n2. 加密或受保护的 PDF\n\n建议：使用包含可选中文字的 PDF 版本。');
-      }, 1500);
-      return;
-    }
-
-    setProgress(60, 'AI 正在解析简历结构（约15-30秒）...');
-
-    // 进度动画：让用户知道AI正在工作
-    let dotCount = 0;
-    const progressInterval = setInterval(() => {
-      dotCount = (dotCount + 1) % 4;
-      const dots = '.'.repeat(dotCount);
-      setProgress(60 + dotCount * 3, `AI 正在解析简历结构${dots}`);
-    }, 2000);
-
-    let resp;
-    try {
-      resp = await chrome.runtime.sendMessage({
+      const resp = await chrome.runtime.sendMessage({
         action: 'PARSE_PDF_RESUME',
         extractedText,
         imageDataUrl: null,
@@ -667,81 +703,74 @@ async function handlePDFUpload(file) {
         textModel: settings.textModel,
         visionModel: settings.visionModel
       });
-    } finally {
-      clearInterval(progressInterval);
+
+      if (resp?.error) throw new Error(resp.error);
+      if (!resp) throw new Error('未收到响应，请刷新后重试');
+
+      // Step 4: 保存简历
+      const fileName = file.name.replace(/\.pdf$/i, '').replace(/[-_]/g, ' ');
+      const newResume = {
+        id: generateId(),
+        name: resp.resume?.personal?.name ? `${resp.resume.personal.name}的简历` : fileName,
+        category: '',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        ...resp.resume
+      };
+
+      allResumes.push(newResume);
+      results[i].status = 'done';
+      results[i].resume = newResume;
+      renderBatchList();
+
+    } catch (err) {
+      console.error(`[CVflash] PDF解析失败 ${file.name}:`, err);
+      results[i].status = 'error';
+      results[i].error = err.message.includes('API Key') ? 'API Key 无效'
+        : err.message.includes('超时') ? '请求超时'
+        : err.message.slice(0, 30);
+      renderBatchList();
     }
-
-    if (resp?.error) {
-      throw new Error(resp.error);
-    }
-    if (!resp) {
-      throw new Error('未收到响应，请检查网络或刷新后重试');
-    }
-
-    setProgress(85, '正在创建简历...');
-
-    // 用解析结果创建新简历
-    const fileName = file.name.replace(/\.pdf$/i, '').replace(/[-_]/g, ' ');
-    const newResume = {
-      id: generateId(),
-      name: resp.resume?.personal?.name ? `${resp.resume.personal.name}的简历` : fileName,
-      category: '',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      ...resp.resume
-    };
-
-    allResumes.push(newResume);
-    await chrome.storage.local.set({ cvflash_resumes: allResumes });
-
-    setProgress(100, 'PDF 解析完成！');
-
-    // 显示解析结果摘要
-    const parts = [`姓名: ${newResume.personal?.name || '未识别'}`];
-    if (newResume.education?.length) parts.push(`教育: ${newResume.education.length} 条`);
-    if (newResume.experience?.length) parts.push(`经历: ${newResume.experience.length} 条`);
-    if (newResume.projects?.length) parts.push(`项目: ${newResume.projects.length} 个`);
-    if (newResume.skills?.length) parts.push(`技能: ${newResume.skills.length} 个`);
-    if (newResume.certifications?.length) parts.push(`证书: ${newResume.certifications.length} 个`);
-    if (newResume.awards?.length) parts.push(`荣誉: ${newResume.awards.length} 个`);
-    const summary = '解析成功！\n• ' + parts.join('\n• ');
-
-    setTimeout(() => {
-      progressEl.classList.add('hidden');
-      renderCategoryFilter();
-      renderResumeList();
-
-      // 自动打开编辑器让用户确认
-      openEditor(newResume);
-      const modeMsg = resp.parseMode === 'ai' ? 'PDF 解析完成（AI 增强）！' :
-                      resp.parseMode === 'local_fallback' ? 'PDF 解析完成（已用本地解析，AI 暂时受限）！' :
-                      'PDF 解析完成！';
-      showNotify(modeMsg + '请确认并补充信息。');
-
-      // 可选：显示解析详情
-      if (resp.rawText || resp.aiResponse) {
-        console.log('PDF 解析调试信息:', {
-          提取文本: resp.rawText,
-          AI响应: resp.aiResponse
-        });
-      }
-    }, 800);
-
-  } catch (err) {
-    progressEl.classList.add('hidden');
-    console.error('PDF解析异常:', err);
-
-    // 根据错误类型给出具体建议
-    let msg = 'PDF 解析失败：' + err.message;
-    if (err.message.includes('API Key') || err.message.includes('无效') || err.message.includes('401')) {
-      msg += '\n\n👉 请前往「API 设置」检查 API Key 是否正确填写。';
-    } else if (err.message.includes('超时') || err.message.includes('timeout')) {
-      msg += '\n\n👉 网络较慢，请稍后重试。或检查 API 服务是否正常。';
-    } else if (err.message.includes('未收到响应')) {
-      msg += '\n\n👉 请刷新页面后重试。';
-    }
-    alert(msg);
   }
+
+  clearInterval(timerInterval);
+
+  // 统一保存所有成功的简历
+  const succeeded = results.filter(r => r.status === 'done');
+  if (succeeded.length > 0) {
+    await chrome.storage.local.set({ cvflash_resumes: allResumes });
+  }
+
+  fillEl.style.width = '100%';
+  const failCount = results.filter(r => r.status === 'error').length;
+  const scanCount = results.filter(r => r.status === 'scan').length;
+  textEl.textContent = isBatch
+    ? `完成：${succeeded.length} 成功${failCount ? `，${failCount} 失败` : ''}${scanCount ? `，${scanCount} 扫描版跳过` : ''}`
+    : '解析完成！';
+  timerEl.textContent = '';
+
+  renderCategoryFilter();
+  renderResumeList();
+
+  // 单文件：直接打开编辑器；多文件：只提示
+  setTimeout(() => {
+    progressEl.classList.add('hidden');
+    batchEl.classList.add('hidden');
+    if (succeeded.length === 0) {
+      let msg = '所有 PDF 解析失败。';
+      if (results[0]?.status === 'error') {
+        const e = results[0].error;
+        if (e.includes('API Key') || e.includes('无效')) msg += '\n\n👉 请检查「API 设置」中的 API Key。';
+        else if (e.includes('超时')) msg += '\n\n👉 网络较慢，请稍后重试。';
+      }
+      alert(msg);
+    } else if (!isBatch) {
+      openEditor(succeeded[0].resume);
+      showNotify('解析完成，请确认并补充信息。');
+    } else {
+      showNotify(`${succeeded.length} 份简历已导入，可在列表中查看。`);
+    }
+  }, 800);
 }
 
 function generateId() {
