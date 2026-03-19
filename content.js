@@ -49,19 +49,11 @@ async function handleDetect() {
 // ─── 填充 ─────────────────────────────────────────────────────────────────────
 
 async function handleAutofill(fieldMap) {
-  let filledCount = 0, skippedCount = 0, alreadyFilledCount = 0;
+  let filledCount = 0, skippedCount = 0;
   for (const [domIndex, value] of Object.entries(fieldMap)) {
     if (value == null || value === '') { skippedCount++; continue; }
     const field = detectedFields.find(f => f._domIndex === Number(domIndex));
     if (!field) { skippedCount++; continue; }
-
-    // 问题2修复：跳过已有内容的字段，避免重复填充
-    const currentVal = getCurrentValue(field.element);
-    if (currentVal && String(currentVal).trim() !== '') {
-      console.log(`[CVflash] 跳过已填写字段: "${field.label}" 当前值="${currentVal}"`);
-      alreadyFilledCount++;
-      continue;
-    }
 
     try {
       await fillField(field, value);
@@ -71,10 +63,10 @@ async function handleAutofill(fieldMap) {
       console.warn('[CVflash] 填充失败:', field.label || field.name, e);
       skippedCount++;
     }
+    await sleep(30); // 字段间延迟，避免框架丢失事件
   }
-  const skipMsg = alreadyFilledCount > 0 ? `，${alreadyFilledCount} 个已有内容跳过` : '';
-  showToast(`✓ 已填充 ${filledCount} 个字段${skipMsg}`, 'success');
-  return { filledCount, skippedCount, alreadyFilledCount };
+  showToast(`✓ 已填充 ${filledCount} 个字段`, 'success');
+  return { filledCount, skippedCount };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -420,6 +412,7 @@ async function fillField(field, value) {
   await sleep(40);
 
   if (field.type === 'contenteditable' || el.contentEditable === 'true') {
+    el.innerHTML = '';
     el.textContent = value;
     el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -433,7 +426,6 @@ async function fillField(field, value) {
   }
 
   if (field.type.startsWith('aria-')) {
-    // ARIA 自定义输入：模拟键盘输入
     el.textContent = '';
     el.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
     await sleep(30);
@@ -445,63 +437,108 @@ async function fillField(field, value) {
     return;
   }
 
-  // 标准 input / textarea - 兼容 React/Vue/Angular
-  const nativeSetter = Object.getOwnPropertyDescriptor(
-    tag === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
-    'value'
-  )?.set;
-
-  if (nativeSetter) {
-    nativeSetter.call(el, value);
-  } else {
-    el.value = value;
+  // 日期/月份字段特殊处理
+  if (el.type === 'date' || el.type === 'month') {
+    await fillDateInput(el, value);
+    return;
   }
 
-  // 触发框架响应
-  ['input', 'change', 'blur'].forEach(evt => {
-    el.dispatchEvent(new Event(evt, { bubbles: true }));
-  });
+  // 标准 input / textarea - 兼容 React/Vue/Angular
+  const proto = tag === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
 
-  // Vue 3 / React 合成事件补充
-  el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value }));
+  // 先清空旧值
+  if (nativeSetter) nativeSetter.call(el, '');
+  else el.value = '';
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  await sleep(20);
+
+  // 写入新值
+  if (nativeSetter) nativeSetter.call(el, value);
+  else el.value = value;
+
+  // React _valueTracker hack
+  const tracker = el._valueTracker;
+  if (tracker) tracker.setValue('');
+
+  // 触发完整事件序列
+  el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  el.dispatchEvent(new Event('blur', { bubbles: true }));
   await sleep(30);
-  el.blur();
+}
+
+async function fillDateInput(el, value) {
+  let normalized = String(value).trim();
+  if (el.type === 'month') {
+    // yyyy-MM-dd → yyyy-MM; yyyy → yyyy-01
+    if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) normalized = normalized.slice(0, 7);
+    else if (/^\d{4}$/.test(normalized)) normalized = normalized + '-01';
+    else if (/^\d{4}[.\/]\d{1,2}$/.test(normalized)) {
+      const [y, m] = normalized.split(/[.\/]/);
+      normalized = `${y}-${m.padStart(2, '0')}`;
+    }
+  } else if (el.type === 'date') {
+    if (/^\d{4}-\d{2}$/.test(normalized)) normalized = normalized + '-01';
+    else if (/^\d{4}$/.test(normalized)) normalized = normalized + '-01-01';
+  }
+
+  const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+  if (nativeSetter) nativeSetter.call(el, normalized);
+  else el.value = normalized;
+
+  const tracker = el._valueTracker;
+  if (tracker) tracker.setValue('');
+
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  el.dispatchEvent(new Event('blur', { bubbles: true }));
 }
 
 async function fillSelect(el, value) {
-  // 优先精确匹配，其次部分匹配
+  const val = String(value).trim();
+  const valLower = val.toLowerCase();
+  const normalize = s => s.replace(/[\s\-_.,()（）【】]/g, '').toLowerCase();
   const options = Array.from(el.options);
-  const exact = options.find(o => o.text.trim() === value || o.value === value);
-  const partial = options.find(o =>
-    o.text.toLowerCase().includes(value.toLowerCase()) ||
-    value.toLowerCase().includes(o.text.toLowerCase())
+
+  // 策略1: 精确匹配 text 或 value
+  let match = options.find(o => o.text.trim() === val || o.value === val);
+  // 策略2: 大小写不敏感包含匹配
+  if (!match) match = options.find(o =>
+    o.text.toLowerCase().includes(valLower) || valLower.includes(o.text.trim().toLowerCase())
   );
-  const match = exact || partial;
+  // 策略3: 去标点归一化匹配
+  if (!match) match = options.find(o => normalize(o.text) === normalize(val));
 
   if (match) {
     const nativeSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
     if (nativeSetter) nativeSetter.call(el, match.value);
     else el.value = match.value;
-
     el.dispatchEvent(new Event('change', { bubbles: true }));
     el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('blur', { bubbles: true }));
+    return;
   }
 
-  // 自定义下拉（click 触发展开）- 若原生 select 没有 options 则尝试点击触发
-  if (!match && el.options.length <= 1) {
-    el.click();
-    await sleep(300);
-    // 查找 dropdown 选项
-    const dropdowns = document.querySelectorAll(
-      '[role="option"], [role="listbox"] li, .dropdown-item, .select-option, [class*="option"]'
-    );
-    for (const opt of dropdowns) {
-      if (opt.textContent?.trim().toLowerCase().includes(value.toLowerCase())) {
-        opt.click();
-        break;
-      }
+  // 策略4: 自定义下拉框 - 点击触发展开，查找浮层选项
+  el.click();
+  await sleep(300);
+  const dropdownSelectors = [
+    '[role="option"]', '[role="listbox"] li', '.dropdown-item', '.select-option',
+    '[class*="option"]', '[class*="dropdown"] li', '.ant-select-item',
+    '.el-select-dropdown__item', '[class*="menu-item"]', '[class*="list-item"]'
+  ].join(', ');
+  const dropdownOpts = document.querySelectorAll(dropdownSelectors);
+  for (const opt of dropdownOpts) {
+    const optText = (opt.textContent || '').trim();
+    if (optText && (optText === val || optText.toLowerCase().includes(valLower) || valLower.includes(optText.toLowerCase()))) {
+      opt.click();
+      await sleep(100);
+      return;
     }
   }
+  // 点击空白关闭弹出
+  document.body.click();
 }
 
 function getAriaOptions(el) {

@@ -165,27 +165,71 @@ btnHistory.addEventListener('click', () => openOptionsIntent({ tab: 'history' })
 // ─── 检测表单字段 ─────────────────────────────────────────────────────────────
 
 async function handleDetect() {
-  showStatus('正在检测表单字段...');
+  if (!activeResume) {
+    showStatus('请先选择简历', false);
+    setTimeout(hideStatus, 2000);
+    return;
+  }
+
+  showStatus('正在分析表单结构...');
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    const resp = await sendToContent(tab.id, { action: 'DETECT_FIELDS' });
 
-    if (resp?.error) throw new Error(resp.error);
+    // 同时检测字段 + AI 预分析
+    const analysisResp = await new Promise((resolve) => {
+      chrome.runtime.sendMessage({
+        action: 'PRE_ANALYZE',
+        tabId: tab.id,
+        resume: activeResume,
+        apiKey,
+        apiBase,
+        providerId: settings.providerId,
+        model: settings.textModel
+      }, resolve);
+    });
 
-    detectedFields = resp.fields || [];
-    updateFieldBadge(detectedFields.length);
+    if (analysisResp?.error) throw new Error(analysisResp.error);
 
-    if (detectedFields.length > 0) {
+    const fieldCount = analysisResp.fieldCount || 0;
+    updateFieldBadge(fieldCount);
+    detectedFields = new Array(fieldCount);
+
+    if (fieldCount > 0) {
       btnFill.disabled = false;
+      renderAnalysisResults(analysisResp.sections || []);
       hideStatus();
     } else {
       showStatus('未找到可填写的表单字段', false);
       setTimeout(hideStatus, 2500);
     }
   } catch (e) {
-    showStatus('检测失败: ' + e.message, false);
+    showStatus('分析失败: ' + e.message, false);
     setTimeout(hideStatus, 3000);
   }
+}
+
+function renderAnalysisResults(sections) {
+  const container = document.getElementById('analysis-results');
+  const wrapper = document.getElementById('pre-analysis');
+
+  if (!sections.length) {
+    wrapper.classList.add('hidden');
+    return;
+  }
+
+  const iconMap = { ok: '✓', need_add: '⚠', no_data: '—' };
+  const classMap = { ok: 'ok', need_add: 'warn', no_data: 'gray' };
+
+  container.innerHTML = sections.map(s => `
+    <div class="analysis-item">
+      <span class="analysis-item__icon">${iconMap[s.action] || '?'}</span>
+      <span class="analysis-item__name">${escapeHtml(s.section)}</span>
+      <span class="analysis-item__detail">表单${s.formSlots}组 / 简历${s.resumeEntries}条</span>
+      <span class="analysis-item__action analysis-item__action--${classMap[s.action] || 'gray'}">${escapeHtml(s.hint)}</span>
+    </div>
+  `).join('');
+
+  wrapper.classList.remove('hidden');
 }
 
 // ─── AI 自动填充（后台驱动，不受 popup 关闭影响）─────────────────────────────
@@ -254,39 +298,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     }
   }
 
-  // 问题1：显示简历条目 vs 表单字段缺口提示
-  if (msg.action === 'FILL_MISSING_HINT' && msg.hints?.length > 0) {
-    showMissingHint(msg.hints);
-  }
 });
-
-// ─── 缺口提示（简历有条目但表单字段不够）────────────────────────────────────
-
-function showMissingHint(hints) {
-  // 如果已有提示框就先移除
-  const existing = document.getElementById('cvflash-missing-hint');
-  if (existing) existing.remove();
-
-  const div = document.createElement('div');
-  div.id = 'cvflash-missing-hint';
-  div.style.cssText = `
-    background: rgba(250,241,223,0.94); border: 1px solid rgba(138,93,36,0.16); border-radius: 16px;
-    padding: 12px 14px; margin: 8px 0; font-size: 12px; color: #8a5d24; line-height: 1.5;
-  `;
-  div.innerHTML = `<strong>建议先在网页手动添加更多条目：</strong><ul style="margin:6px 0 0 14px;padding:0">` +
-    hints.map(h => `<li>${h}</li>`).join('') +
-    `</ul><div style="margin-top:6px;font-size:11px;color:#5f6a76">手动添加后请重新点击「AI 自动填充」。</div>`;
-
-  const anchorEl = document.getElementById('status-message') || document.querySelector('.page-status');
-  if (anchorEl) {
-    anchorEl.insertAdjacentElement('afterend', div);
-  } else {
-    document.body.appendChild(div);
-  }
-
-  // 10秒后自动消失
-  setTimeout(() => div.remove(), 10000);
-}
 
 // ─── 视觉模式（已合并到主填充流程）────────────────────────────────────────────
 

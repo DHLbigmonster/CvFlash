@@ -115,6 +115,7 @@ body {
 .hero-panel,
 .resume-section,
 .page-status,
+.pre-analysis,
 .status-message,
 .error-message,
 .api-warning {
@@ -123,6 +124,23 @@ body {
   background: var(--panel);
   backdrop-filter: blur(14px);
 }
+
+.pre-analysis { padding: 14px 16px; margin-bottom: 6px; }
+.pre-analysis .section__label { margin-bottom: 8px; }
+
+.analysis-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 0; font-size: 12px; line-height: 1.4;
+  border-bottom: 1px solid var(--border);
+}
+.analysis-item:last-child { border-bottom: none; }
+.analysis-item__icon { font-size: 14px; flex-shrink: 0; }
+.analysis-item__name { font-weight: 600; color: var(--text); min-width: 72px; }
+.analysis-item__detail { color: var(--text-muted); flex: 1; }
+.analysis-item__action { font-weight: 500; white-space: nowrap; }
+.analysis-item__action--ok { color: var(--success); }
+.analysis-item__action--warn { color: var(--warning); }
+.analysis-item__action--gray { color: var(--text-soft); }
 
 .hero-panel {
   padding: 16px;

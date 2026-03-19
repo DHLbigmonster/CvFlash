@@ -74,8 +74,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
 
     case 'START_FILL': {
-      // 整个填充流程在 background 中完成，不依赖 popup
       handleFullFill(msg).then(sendResponse).catch(e => sendResponse({ error: e.message }));
+      return true;
+    }
+
+    case 'PRE_ANALYZE': {
+      handlePreAnalysis(msg).then(sendResponse).catch(e => sendResponse({ error: e.message }));
       return true;
     }
 
@@ -135,50 +139,28 @@ async function handleFullFill({ tabId, resume, apiKey, apiBase, providerId, mode
     let currentSection = 0;
     const allFieldMap = {};
     let totalAiMatched = 0;
-    let totalFallbackUsed = 0;
 
     for (const [sectionName, sectionFields] of Object.entries(sectionGroups)) {
       currentSection++;
       const progress = 20 + Math.floor((currentSection / totalSections) * 50);
 
-      // 更新状态：显示当前处理的分区
       updateFillStatus('matching', `[${currentSection}/${totalSections}] 正在处理 ${sectionName}...`, progress);
       console.log(`\n=== 处理分区: ${sectionName} (${sectionFields.length} 个字段) ===`);
 
-      // 构建该分区的本地候选
-      const { fieldHints, fallbackFieldMap } = localRuleMatch(sectionFields, resume);
-      const hintCount = Object.keys(fieldHints).length;
-
-      // AI 匹配该分区的字段（完全自主决策，不受本地规则干扰）
+      // AI 完全自主决策
       const aiResult = await handleAIMatch({
-        fields: sectionFields,
-        resume,
-        apiKey,
-        apiBase,
-        providerId,
-        model,
+        fields: sectionFields, resume, apiKey, apiBase, providerId, model,
         sectionContext: sectionName
       });
 
       if (aiResult.error) {
         console.warn(`分区 ${sectionName} AI 匹配失败:`, aiResult.error);
-        // 分区失败不影响其他分区，直接使用兜底
-        const fallbackMap = applyFallbackFieldMap({}, fallbackFieldMap);
-        Object.assign(allFieldMap, fallbackMap);
-        totalFallbackUsed += Object.keys(fallbackMap).length;
-        continue;
+        continue; // 分区失败不影响其他分区
       }
 
-      // 合并 AI 结果和兜底
-      const sectionFieldMap = applyFallbackFieldMap(aiResult.fieldMap, fallbackFieldMap);
-      Object.assign(allFieldMap, sectionFieldMap);
-
-      const aiMatchedCount = Object.keys(aiResult.fieldMap || {}).length;
-      const fallbackUsedCount = Object.keys(sectionFieldMap).length - aiMatchedCount;
-      totalAiMatched += aiMatchedCount;
-      totalFallbackUsed += fallbackUsedCount;
-
-      console.log(`✓ ${sectionName}: AI匹配 ${aiMatchedCount} 个, 兜底 ${fallbackUsedCount} 个`);
+      Object.assign(allFieldMap, aiResult.fieldMap);
+      totalAiMatched += Object.keys(aiResult.fieldMap || {}).length;
+      console.log(`✓ ${sectionName}: AI匹配 ${Object.keys(aiResult.fieldMap || {}).length} 个`);
     }
 
     const matchedCount = Object.keys(allFieldMap).length;
@@ -213,11 +195,8 @@ async function handleFullFill({ tabId, resume, apiKey, apiBase, providerId, mode
     if (history.length > 50) history.length = 50;
     await chrome.storage.local.set({ cvflash_history: history });
 
-    updateFillStatus('done', `已填充 ${fillResp.filledCount} 个字段（AI ${totalAiMatched}${totalFallbackUsed > 0 ? ` + 规则兜底 ${totalFallbackUsed}` : ''}）`, 100);
-    console.log(`=== 填充完成 ===`);
-    console.log(`总计: ${fillResp.filledCount}/${fields.length} 个字段`);
-    console.log(`AI匹配: ${totalAiMatched} 个`);
-    console.log(`规则兜底: ${totalFallbackUsed} 个`);
+    updateFillStatus('done', `已填充 ${fillResp.filledCount} 个字段（AI 匹配 ${totalAiMatched}）`, 100);
+    console.log(`=== 填充完成: ${fillResp.filledCount}/${fields.length} 个字段 ===`);
 
     return { fieldMap: allFieldMap, filledCount: fillResp.filledCount, totalFields: fields.length };
 
@@ -226,6 +205,115 @@ async function handleFullFill({ tabId, resume, apiKey, apiBase, providerId, mode
     console.error('=== 填充流程异常 ===', e);
     return { error: e.message };
   }
+}
+
+// ─── 预分析：AI 对比表单 vs 简历，提示用户添加条目 ──────────────────────────
+
+async function handlePreAnalysis({ tabId, resume, apiKey, apiBase, providerId, model }) {
+  // 1. 检测字段
+  const detectResp = await sendToTab(tabId, { action: 'DETECT_FIELDS' });
+  if (!detectResp?.fields?.length) return { error: '未找到表单字段', sections: [] };
+
+  const fields = detectResp.fields;
+  const sectionGroups = groupFieldsBySection(fields);
+
+  // 2. 构建表单结构摘要
+  const formSummary = [];
+  for (const [sectionName, sectionFields] of Object.entries(sectionGroups)) {
+    const groupIds = new Set(sectionFields.map(f => f.group?.id || `single_${f._domIndex}`));
+    const groupCount = groupIds.size > 1 ? groupIds.size : Math.max(1, Math.ceil(sectionFields.length / 3));
+    const fieldLabels = sectionFields.map(f => f.label || f.name || f.placeholder || '?').slice(0, 8);
+    formSummary.push({ name: sectionName, fieldCount: sectionFields.length, groupCount, fieldLabels });
+  }
+
+  // 3. 构建简历摘要
+  const resumeCounts = {
+    education: resume.education?.length || 0,
+    experience: resume.experience?.length || 0,
+    projects: resume.projects?.length || 0,
+    activities: resume.activities?.length || 0,
+    research: resume.research?.length || 0
+  };
+
+  // 4. AI 分析
+  const base = apiBase || API_BASES.cn;
+  const provider = resolveProvider(providerId, base);
+  const authToken = normalizeAuthToken(apiKey, provider);
+
+  if (!authToken) {
+    // 无 API Key 时用本地对比
+    return { sections: localCompareFormResume(formSummary, resumeCounts), fieldCount: fields.length };
+  }
+
+  const defaultModel = resolveDefaultModel(provider.id, base);
+  const resolvedModel = resolveFieldMatchModel(provider, model || defaultModel);
+
+  const prompt = `你是招聘表单分析助手。请对比表单结构和简历数据，判断用户需要手动添加多少条目。
+
+【表单结构】
+${formSummary.map(s => `- "${s.name}": ${s.fieldCount}个字段, 约${s.groupCount}组条目, 字段包含: ${s.fieldLabels.join(', ')}`).join('\n')}
+
+【简历数据量】
+- 教育经历: ${resumeCounts.education} 条
+- 工作/实习经历: ${resumeCounts.experience} 条
+- 项目经历: ${resumeCounts.projects} 条
+- 校园/社团经历: ${resumeCounts.activities} 条
+- 科研经历: ${resumeCounts.research} 条
+
+【任务】
+对每个表单分区，判断：
+1. 该分区对应简历的哪个类别？
+2. 表单有几组条目位？简历有几条数据？
+3. 用户是否需要手动在网页上添加更多条目？
+
+返回纯JSON数组（不要解释），每项格式：
+{"section":"分区名","category":"education|experience|projects|activities|research|other","formSlots":数字,"resumeEntries":数字,"gap":数字,"action":"ok|need_add|no_data","hint":"提示文字"}
+
+gap = max(0, resumeEntries - formSlots)
+action: "ok"=够用, "need_add"=需要手动添加, "no_data"=简历无此类数据`;
+
+  try {
+    const response = await callChatAPI(base, authToken, provider, resolvedModel, [
+      { role: 'user', content: prompt }
+    ], { temperature: 0.1, max_tokens: 2048, timeout: 30000 });
+
+    const jsonStr = extractJsonCandidate(response);
+    const analysis = JSON.parse(jsonStr.replace(/,\s*([}\]])/g, '$1'));
+    return { sections: Array.isArray(analysis) ? analysis : [], fieldCount: fields.length };
+  } catch (e) {
+    console.warn('AI 预分析失败，使用本地对比:', e.message);
+    return { sections: localCompareFormResume(formSummary, resumeCounts), fieldCount: fields.length };
+  }
+}
+
+function localCompareFormResume(formSummary, resumeCounts) {
+  const results = [];
+  const categoryMap = {
+    '教育': 'education', 'Education': 'education',
+    '实习': 'experience', '工作': 'experience', 'Employment': 'experience', 'Work': 'experience',
+    '项目': 'projects', 'Project': 'projects',
+    '校园': 'activities', '社团': 'activities', '活动': 'activities',
+    '科研': 'research', 'Research': 'research',
+    '创业': 'experience', '获奖': 'other', '作品': 'other'
+  };
+
+  for (const section of formSummary) {
+    let category = 'other';
+    for (const [keyword, cat] of Object.entries(categoryMap)) {
+      if (section.name.includes(keyword)) { category = cat; break; }
+    }
+
+    const resumeEntries = resumeCounts[category] || 0;
+    const formSlots = section.groupCount;
+    const gap = Math.max(0, resumeEntries - formSlots);
+
+    results.push({
+      section: section.name, category, formSlots, resumeEntries, gap,
+      action: gap > 0 ? 'need_add' : (resumeEntries === 0 ? 'no_data' : 'ok'),
+      hint: gap > 0 ? `需要手动添加 ${gap} 条` : (resumeEntries === 0 ? '简历无此类数据' : '数量匹配')
+    });
+  }
+  return results;
 }
 
 // ─── 表单分区分组 ─────────────────────────────────────────────────────────────
@@ -321,246 +409,7 @@ function detectMissingEntries(fields, resume, sectionGroups) {
   return hints;
 }
 
-// ─── 本地规则候选（作为 AI 提示与高置信度兜底）──────────────────────────────
-
-function localRuleMatch(fields, resume) {
-  const fieldHints = {};
-  const fallbackFieldMap = {};
-
-  // 对字段按 group 分组，每组使用不同的条目索引
-  const groups = new Map();
-  for (const field of fields) {
-    const groupId = field.group?.id || `single_${field._domIndex}`;
-    if (!groups.has(groupId)) groups.set(groupId, []);
-    groups.get(groupId).push(field);
-  }
-
-  let groupIndex = 0;
-  for (const [groupId, groupFields] of groups) {
-    // 对该组的每个字段应用匹配，使用组索引
-    for (const field of groupFields) {
-      const suggestion = matchFieldByRules(field, resume, groupIndex);
-      if (!suggestion?.value) continue;
-
-      const normalized = normalizeSuggestionForField(field, suggestion.value);
-      if (!normalized.value) continue;
-
-      const hint = {
-        value: normalized.value,
-        confidence: suggestion.confidence,
-        source: suggestion.source,
-        fallback: suggestion.confidence === 'high' && normalized.allowFallback !== false
-      };
-
-      fieldHints[field._domIndex] = hint;
-      if (hint.fallback) fallbackFieldMap[field._domIndex] = hint.value;
-    }
-    groupIndex++;
-  }
-
-  return { fieldHints, fallbackFieldMap };
-}
-
-function createFieldSuggestion(value, confidence, source) {
-  if (value == null || value === '') return null;
-  return { value: String(value), confidence, source };
-}
-
-function normalizeSuggestionForField(field, value) {
-  const raw = String(value || '').trim();
-  if (!raw) return { value: '', allowFallback: false };
-
-  if (!field.options?.length) {
-    return { value: raw, allowFallback: true };
-  }
-
-  const exact = field.options.find(option => option.trim().toLowerCase() === raw.toLowerCase());
-  if (exact) return { value: exact, allowFallback: true };
-
-  const partial = field.options.find(option => {
-    const normalizedOption = option.trim().toLowerCase();
-    const normalizedRaw = raw.toLowerCase();
-    return normalizedOption.includes(normalizedRaw) || normalizedRaw.includes(normalizedOption);
-  });
-  if (partial) return { value: partial, allowFallback: false };
-
-  return { value: raw, allowFallback: false };
-}
-
-function applyFallbackFieldMap(aiFieldMap, fallbackFieldMap) {
-  const merged = { ...(aiFieldMap || {}) };
-  for (const [domIndex, value] of Object.entries(fallbackFieldMap || {})) {
-    if (merged[domIndex] == null || merged[domIndex] === '') {
-      merged[domIndex] = value;
-    }
-  }
-  return merged;
-}
-
-function matchFieldByRules(field, resume, groupIndex = 0) {
-  const label = (field.label || field.name || field.placeholder || '').toLowerCase();
-  const hint = (field.hint || '').toLowerCase();
-  const section = (field.section || '').toLowerCase();
-  const p = resume.personal || {};
-
-  // 根据 group 信息确定这是第几个条目（用于多个教育/工作/项目组）
-  let entryIndex = groupIndex;
-  // 如果 field 有 group 信息，尝试从 group ID 中解析索引
-  if (field.group?.id && typeof field.group.id === 'string') {
-    const groupMatch = field.group.id.match(/_?(\d+)$/);
-    if (groupMatch) {
-      entryIndex = parseInt(groupMatch[1]) || 0;
-    }
-  }
-
-  if (hint === 'name' || hint === 'firstname' || hint === 'lastname' || /^(full.?)?name$|姓名|名字|your.?name/i.test(label)) {
-    return createFieldSuggestion(p.name, 'high', 'personal.name');
-  }
-
-  if (hint === 'email' || /e-?mail|邮箱|电子邮/i.test(label)) {
-    return createFieldSuggestion(p.email, 'high', 'personal.email');
-  }
-
-  if (hint === 'phone' || /phone|mobile|tel|手机|电话|联系方式/i.test(label)) {
-    return createFieldSuggestion(p.phone, 'high', 'personal.phone');
-  }
-
-  if (hint === 'location' || /city|location|address|城市|地址|所在地|居住/i.test(label)) {
-    return createFieldSuggestion(p.location, 'high', 'personal.location');
-  }
-
-  if (hint === 'linkedin' || /linkedin/i.test(label)) {
-    return createFieldSuggestion(p.linkedin, 'high', 'personal.linkedin');
-  }
-
-  if (hint === 'github' || /github/i.test(label)) {
-    return createFieldSuggestion(p.github, 'high', 'personal.github');
-  }
-
-  if (hint === 'portfolio' || /portfolio|website|个人网站/i.test(label)) {
-    return createFieldSuggestion(p.website, 'high', 'personal.website');
-  }
-
-  if (hint === 'gender' || /gender|sex|性别/i.test(label)) {
-    return createFieldSuggestion(p.gender, 'high', 'personal.gender');
-  }
-
-  if (hint === 'birthday' || /birth|dob|出生|生日/i.test(label)) {
-    return createFieldSuggestion(p.birthDate, 'high', 'personal.birthDate');
-  }
-
-  if (
-    section.includes('教育') ||
-    /school|university|college|institution|学校|大学|院校/i.test(label) ||
-    /degree|education.?level|学历|学位/i.test(label) ||
-    /major|field.?of.?study|discipline|专业|学专/i.test(label) ||
-    /gpa|grade.?point|成绩|绩点/i.test(label) ||
-    /graduation|graduat|毕业时间|毕业年份/i.test(label)
-  ) {
-    const edu = resume.education?.[entryIndex];
-    if (!edu) return null;
-
-    if (hint === 'school' || /school|university|college|institution|学校|大学|院校/i.test(label)) {
-      return createFieldSuggestion(edu.school, 'medium', 'education.school');
-    }
-    if (hint === 'degree' || /degree|education.?level|学历|学位/i.test(label)) {
-      return createFieldSuggestion(edu.degree, 'medium', 'education.degree');
-    }
-    if (hint === 'major' || /major|field.?of.?study|discipline|专业|学专/i.test(label)) {
-      return createFieldSuggestion(edu.major, 'medium', 'education.major');
-    }
-    if (hint === 'gpa' || /gpa|grade.?point|成绩|绩点/i.test(label)) {
-      return createFieldSuggestion(edu.gpa, 'medium', 'education.gpa');
-    }
-    if (hint === 'graduation' || /graduation|graduat|毕业时间|毕业年份/i.test(label)) {
-      return createFieldSuggestion(edu.endDate, 'medium', 'education.endDate');
-    }
-  }
-
-  if (
-    section.includes('工作') ||
-    section.includes('实习') ||
-    /company|employer|organization|firm|单位|公司|雇主/i.test(label) ||
-    /position|job.?title|role|岗位|职位|应聘/i.test(label) ||
-    /from|start|入职|开始/i.test(label) ||
-    /to\b|end|until|present|离职|结束/i.test(label)
-  ) {
-    const exp = resume.experience?.[entryIndex];
-    if (!exp) return null;
-
-    if (hint === 'company' || /company|employer|organization|firm|单位|公司|雇主/i.test(label)) {
-      return createFieldSuggestion(exp.company, 'medium', 'experience.company');
-    }
-    if (hint === 'position' || /position|job.?title|role|岗位|职位|应聘/i.test(label)) {
-      return createFieldSuggestion(exp.position, 'medium', 'experience.position');
-    }
-    if (hint === 'jobStartDate' || /from|start|入职|开始/i.test(label)) {
-      return createFieldSuggestion(exp.startDate, 'medium', 'experience.startDate');
-    }
-    if (hint === 'jobEndDate' || /to\b|end|until|present|离职|结束/i.test(label)) {
-      return createFieldSuggestion(exp.current ? '至今' : exp.endDate, 'medium', 'experience.endDate');
-    }
-  }
-
-  if (hint === 'skills' || /skill|技能|ability|expertise/i.test(label)) {
-    return createFieldSuggestion(resume.skills?.join(', '), 'low', 'skills');
-  }
-
-  if (hint === 'languages' || /language|语言/i.test(label)) {
-    return createFieldSuggestion(resume.languages?.join(', '), 'low', 'languages');
-  }
-
-  // 项目经历字段匹配
-  if (
-    section.includes('项目') ||
-    section.includes('project') ||
-    /projectname|项目名|项目名称|project.?title/i.test(label) ||
-    /projectrole|项目角色|project.?role|项目负责人|项目职位/i.test(label) ||
-    /projectdesc|项目描述|project.?description|项目内容|项目简介/i.test(label) ||
-    /projecturl|项目链接|project.?link|project.?url/i.test(label) ||
-    /projectstart|项目开始/i.test(label) ||
-    /projectend|项目结束/i.test(label)
-  ) {
-    const proj = resume.projects?.[entryIndex];
-    if (!proj) return null;
-
-    if (/projectname|项目名|项目名称|project.?title/i.test(label)) {
-      return createFieldSuggestion(proj.name, 'medium', 'project.name');
-    }
-    if (/projectrole|项目角色|project.?role|项目负责人|项目职位/i.test(label)) {
-      return createFieldSuggestion(proj.role || '项目负责人', 'medium', 'project.role');
-    }
-    if (/projectdesc|项目描述|project.?description|项目内容|项目简介/i.test(label)) {
-      return createFieldSuggestion(proj.description, 'low', 'project.description');
-    }
-    if (/projecturl|项目链接|project.?link|project.?url/i.test(label)) {
-      return createFieldSuggestion(proj.url || '', 'low', 'project.url');
-    }
-    // 项目开始时间（如果label包含"项目"和"开始"关键词）
-    if (/project.*start|项目.*开始/i.test(label)) {
-      return createFieldSuggestion(proj.startDate, 'medium', 'project.startDate');
-    }
-    // 项目结束时间（如果label包含"项目"和"结束"关键词）
-    if (/project.*end|项目.*结束/i.test(label)) {
-      return createFieldSuggestion(proj.endDate, 'medium', 'project.endDate');
-    }
-  }
-
-  // 检查是否是通用的时间字段，在项目分区下可能是项目时间
-  if (section.includes('项目') || section.includes('project')) {
-    const proj = resume.projects?.[entryIndex];
-    if (!proj) return null;
-
-    if (/from|start|开始/i.test(label) && !/(job|work|company)/i.test(label)) {
-      return createFieldSuggestion(proj.startDate, 'medium', 'project.startDate');
-    }
-    if (/to\b|end|until|结束/i.test(label) && !/(job|work|company)/i.test(label)) {
-      return createFieldSuggestion(proj.endDate, 'medium', 'project.endDate');
-    }
-  }
-
-  return null;
-}
+// （本地规则已移除 - AI 完全自主决策）
 
 // ─── AI 字段匹配（纯文本模式）────────────────────────────────────────────────
 
@@ -704,17 +553,6 @@ function buildStructuredFieldPrompt(fields) {
   return lines.join('\n');
 }
 
-function buildFieldHintsPrompt(fields, fieldHints) {
-  const hintLines = fields
-    .filter(field => fieldHints[field._domIndex]?.value)
-    .map(field => {
-      const hint = fieldHints[field._domIndex];
-      return `#${field._domIndex}: 候选="${hint.value}" 置信度=${hint.confidence} 来源=${hint.source}`;
-    });
-
-  return hintLines.length ? hintLines.join('\n') : '（无规则候选）';
-}
-
 function buildExistingMatchesPrompt(fieldMap, fields) {
   const lines = Object.entries(fieldMap || {})
     .map(([domIndex, value]) => {
@@ -742,12 +580,13 @@ ${structuredFields}
 ${resumeSummary}
 
 【AI 决策准则（重要）】
-1. 🎯 完全自主理解字段语义 - 不要依赖任何预设规则，通过标签、占位符、位置、分组关系综合判断
+1. 🎯 完全自主理解字段语义 - 通过标签、占位符、位置、分组关系综合判断
 2. 🔗 同组字段关联性 - 同一组字段（同学校/公司/项目）必须来自简历的同一条记录
 3. ⏰ 多组条目分配 - 多组重复字段按时间从近到远匹配（最近的排第1组）
-4. 🔒 已有内容跳过 - 有 当前值="..." 的字段返回 null，不覆盖
+4. 🔄 强制覆盖模式 - 无论字段是否有"当前值"，都用简历数据覆盖（用户要求更新）
 5. ✅ 选项严格匹配 - 有选项的字段必须完全匹配选项文本之一（可进行语义同义转换）
 6. 🚫 数据质量校验 - 邮箱含@、电话纯数字、学校不含@、公司不含@
+7. 📅 日期格式 - 日期返回 YYYY-MM 格式（如 2024-09），不要只返回年份
 
 【语义映射策略】
 通过以下线索判断字段用途：
@@ -763,7 +602,7 @@ ${resumeSummary}
 - 校园经历：社团/组织/学生会 → 校园经历分区
 
 【输出要求】
-- 覆盖所有字段，已有内容或真正无法判断的字段返回 null
+- 尽可能为每个字段匹配简历数据，真正无法判断时才返回 null
 - 只返回纯 JSON 对象，不要解释、不要 markdown 格式
 
 JSON格式示例：{"0":"丁宏磊","1":"3043755156@qq.com","5":"上海外国语大学","10":"MoodPulse","11":"项目负责人","15":null}`;
@@ -814,10 +653,11 @@ ${JSON.stringify(simpleFields)}
 ${resumeSummary.slice(0, 2000)}
 
 【匹配规则】
-- 完全自主判断字段语义，不受预设限制
+- 完全自主判断字段语义
+- 强制覆盖模式：无论字段是否有当前值，都用简历数据覆盖
 - 邮箱含@、电话纯数字、学校不含邮箱格式
 - 同组字段必须来自同一条记录
-- 有当前值的字段返回 null 跳过
+- 日期返回 YYYY-MM 格式
 - 真正无法判断时返回 null
 
 返回纯JSON对象：{"字段索引":"值"}`;
